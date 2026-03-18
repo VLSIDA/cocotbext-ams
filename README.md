@@ -85,7 +85,20 @@ make -j$(nproc)
 ## Installation
 
 ```bash
-pip install -e path/to/cocotbext-ams
+pip install cocotbext-ams
+```
+
+Or install from GitHub for the latest development version:
+
+```bash
+pip install git+https://github.com/VLSIDA/cocotbext-ams.git
+```
+
+For local development:
+
+```bash
+git clone https://github.com/VLSIDA/cocotbext-ams.git
+pip install -e cocotbext-ams
 ```
 
 ## Quick Start

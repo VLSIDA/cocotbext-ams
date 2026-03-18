@@ -26,7 +26,7 @@ DAC output steps: 0.9V → 1.35V → 1.125V → ... converging in 8 steps.*
 - [cocotb](https://github.com/cocotb/cocotb) >= 2.0
 - [Icarus Verilog](https://github.com/steveicarus/iverilog)
 - ngspice >= 45, built with `--with-ngshared` (see [README](../../README.md))
-- cocotbext-ams installed (`pip install -e path/to/cocotbext-ams`)
+- cocotbext-ams installed (`pip install cocotbext-ams`)
 - [sky130 PDK](https://github.com/google/skywater-pdk) with `PDK_ROOT` set:
 
 ```bash
