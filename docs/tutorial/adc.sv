@@ -1,46 +1,81 @@
 // Complete SAR ADC module.
 //
-// Wraps the PWM generator, SAR controller, and analog comparator block
-// (SPICE stub) into a single module.  The cocotbext-ams bridge controls
-// the internal pwm_dac instance (u_analog) to connect SPICE simulation.
+// A single fast clock (clk) drives the PWM counter and is divided down
+// internally to produce the SAR clock.  The comparator is latched once
+// per bit by the SAR controller's comp_latch output.
+//
+// Clock tree (all derived from clk):
+//   clk          -> PWM counter (e.g., 1 GHz)
+//   clk/SAR_DIV  -> SAR step clock (e.g., /100 = 10 MHz)
+//
+// The SAR controller waits SETTLE_CYCLES of the SAR clock between bit
+// decisions, then pulses comp_latch to trigger the comparator once.
 
 module adc #(
-    parameter N_BITS = 8
+    parameter N_BITS        = 8,
+    parameter SAR_DIV       = 100,  // clk divider for SAR clock
+    parameter SETTLE_CYCLES = 50    // SAR clock cycles to wait per bit
 )(
-    input  wire              pwm_clk,    // fast clock for PWM counter
-    input  wire              comp_clk,   // comparator latch clock
-    input  wire              sar_clk,    // slow clock for SAR steps
+    input  wire              clk,        // fast clock (drives everything)
     input  wire              reset_n,
     input  wire              vin,        // analog input to measure (stays X in digital)
-    output wire [N_BITS-1:0] duty,       // current/final duty cycle value
+    output wire [N_BITS-1:0] value,      // current/final digital value
     output wire              done        // SAR conversion complete
 );
     wire pwm_out;
     wire q, qb;
+    wire comp_latch;
+
+    // --- Clock divider ---
+
+    // SAR clock: clk / SAR_DIV
+    reg [$clog2(SAR_DIV)-1:0] sar_div_count;
+    reg                       sar_clk;
+
+    always @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            sar_div_count <= 0;
+            sar_clk       <= 0;
+        end else begin
+            if (sar_div_count >= SAR_DIV/2 - 1) begin
+                sar_div_count <= 0;
+                sar_clk       <= ~sar_clk;
+            end else begin
+                sar_div_count <= sar_div_count + 1;
+            end
+        end
+    end
+
+    // --- Datapath ---
 
     // Analog block: RC filter + latch comparator (SPICE via cocotbext-ams)
+    // comp_latch from SAR controller triggers comparator once per bit
     pwm_dac u_analog (
         .pwm_in(pwm_out),
-        .clk(comp_clk),
+        .clk(comp_latch),
         .vin(vin),
         .q(q),
         .qb(qb)
     );
 
-    // PWM generator: converts duty register to PWM output
+    // PWM generator: converts value register to PWM output
     pwm_gen #(.N_BITS(N_BITS)) u_pwm_gen (
-        .clk(pwm_clk),
+        .clk(clk),
         .reset_n(reset_n),
-        .duty(duty),
+        .duty(value),
         .pwm_out(pwm_out)
     );
 
-    // SAR controller: binary search for duty cycle matching vref
-    sar_controller #(.N_BITS(N_BITS)) u_sar (
+    // SAR controller: binary search with settling delay
+    sar_controller #(
+        .N_BITS(N_BITS),
+        .SETTLE_CYCLES(SETTLE_CYCLES)
+    ) u_sar (
         .clk(sar_clk),
         .reset_n(reset_n),
         .comp_q(q),
-        .duty(duty),
-        .done(done)
+        .value(value),
+        .done(done),
+        .comp_latch(comp_latch)
     );
 endmodule

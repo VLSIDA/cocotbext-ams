@@ -1,39 +1,39 @@
 // Testbench for SAR ADC mixed-signal co-simulation tutorial.
 //
-// Instantiates the adc module which contains the PWM generator,
-// SAR controller, and SPICE analog block.  cocotb drives the clocks
-// and reset; the SAR controller does the binary search in hardware.
+// A single fast clock drives everything.  Internally, the adc module
+// divides it down for the SAR clock.  The comparator is latched once
+// per bit by the SAR controller.
+//
+//   clk (1 GHz) -> PWM counter (256 ns period << RC tau = 1 us)
+//   clk/100     -> SAR step clock (10 MHz), 50 cycles settle = 5 us/bit
 
 `timescale 1ns/1ps
 
 module tb_pwm_dac;
-    // Clocks and reset (driven by cocotb)
-    reg pwm_clk;
-    reg comp_clk;
-    reg sar_clk;
+    // Single clock and reset (driven by cocotb)
+    reg clk;
     reg reset_n;
 
     // Outputs
-    wire [7:0] duty;
+    wire [7:0] value;
     wire       done;
     wire       vin;
 
-    // ADC: PWM generator + SAR controller + analog comparator
-    adc #(.N_BITS(8)) dut (
-        .pwm_clk(pwm_clk),
-        .comp_clk(comp_clk),
-        .sar_clk(sar_clk),
+    adc #(
+        .N_BITS(8),
+        .SAR_DIV(100),
+        .SETTLE_CYCLES(50)
+    ) dut (
+        .clk(clk),
         .reset_n(reset_n),
         .vin(vin),
-        .duty(duty),
+        .value(value),
         .done(done)
     );
 
     initial begin
-        pwm_clk  = 0;
-        comp_clk = 0;
-        sar_clk  = 0;
-        reset_n  = 0;
+        clk     = 0;
+        reset_n = 0;
     end
 
     // Dump digital waveforms
