@@ -14,7 +14,7 @@ Clock:
   - clk:      1 GHz fast clock for PWM counter
                Divided internally -> 10 MHz SAR clock
                Comparator latched once per bit by SAR controller
-               PWM period = 256 ns << RC tau = 1 us (smooth output)
+               PWM period = 256 ns << RC tau = 10 us (smooth output)
 
 The test just drives clk and waits for the SAR `done` signal.
 """
@@ -33,14 +33,14 @@ VDD = 1.8
 VIN = 1.15  # analog input voltage to digitize
 
 # Timing
-# RC filter: tau = 10k * 100pF = 1 us
+# RC filter: tau = 10k * 1nF = 10 us
 # PWM clock: 1 GHz (1 ns) -> PWM period = 256 ns << tau (smooth output)
 # CLK_DIV = 100 -> SAR clock = 10 MHz (100 ns period)
-# SETTLE_CYCLES = 50 SAR clocks = 5 us = 5 tau per bit
+# SETTLE_CYCLES = 500 SAR clocks = 50 us = 5 tau per bit
 CLK_DIV = 100
 SAR_CLK_PERIOD_NS = CLK_DIV  # 100 ns at 1 GHz / 100
-SETTLE_CYCLES = 50
-SETTLE_TIME_NS = SETTLE_CYCLES * SAR_CLK_PERIOD_NS  # 5000 ns = 5 us
+SETTLE_CYCLES = 500
+SETTLE_TIME_NS = SETTLE_CYCLES * SAR_CLK_PERIOD_NS  # 50000 ns = 50 us
 
 
 def _sky130_include() -> list[str]:

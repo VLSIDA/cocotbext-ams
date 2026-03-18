@@ -5,7 +5,7 @@
 // per bit by the SAR controller.
 //
 //   clk (1 GHz) -> PWM counter (256 ns period << RC tau = 1 us)
-//   clk/100     -> SAR step clock (10 MHz), 50 cycles settle = 5 us/bit
+//   clk/100     -> SAR step clock (10 MHz), 500 cycles settle = 50 us/bit
 
 `timescale 1ns/1ps
 
@@ -22,7 +22,7 @@ module tb_pwm_dac;
     adc #(
         .N_BITS(8),
         .SAR_DIV(100),
-        .SETTLE_CYCLES(50)
+        .SETTLE_CYCLES(500)
     ) dut (
         .clk(clk),
         .reset_n(reset_n),

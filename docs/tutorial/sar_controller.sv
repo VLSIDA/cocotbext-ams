@@ -1,7 +1,7 @@
 // Successive-approximation controller for PWM DAC.
 //
 // After setting each trial bit, waits SETTLE_CYCLES of sar_clk for
-// the RC filter output to converge, then pulses comp_latch to trigger
+// the RC filter output to converge, then pulses comp_clk to trigger
 // the comparator, and samples comp_q on the next clock edge.
 //
 // After N_BITS decisions, `done` goes high and `value` holds the result.
@@ -15,7 +15,7 @@ module sar_controller #(
     input  wire              comp_q,     // comparator output (1 = DAC > vin)
     output reg [N_BITS-1:0]  value,      // converging digital value
     output reg               done,
-    output reg               comp_latch  // pulses once per bit to trigger comparator
+    output reg               comp_clk  // pulses once per bit to trigger comparator
 );
     localparam CTR_W = $clog2(SETTLE_CYCLES + 1);
 
@@ -34,16 +34,16 @@ module sar_controller #(
             value        <= (1 << (N_BITS - 1));
             bit_idx      <= N_BITS - 1;
             done         <= 0;
-            comp_latch   <= 0;
+            comp_clk   <= 0;
             settle_count <= 0;
             state        <= S_SETTLE;
         end else begin
             case (state)
                 S_SETTLE: begin
-                    comp_latch <= 0;
+                    comp_clk <= 0;
                     if (settle_count >= SETTLE_CYCLES - 1) begin
                         // Settling done — pulse comparator latch
-                        comp_latch   <= 1;
+                        comp_clk   <= 1;
                         settle_count <= 0;
                         state        <= S_LATCH;
                     end else begin
@@ -52,9 +52,9 @@ module sar_controller #(
                 end
 
                 S_LATCH: begin
-                    // comp_latch was high for one cycle; now wait one
+                    // comp_clk was high for one cycle; now wait one
                     // cycle for comparator output to propagate
-                    comp_latch <= 0;
+                    comp_clk <= 0;
                     state      <= S_DECIDE;
                 end
 

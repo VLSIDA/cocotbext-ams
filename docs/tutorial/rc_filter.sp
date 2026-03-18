@@ -9,6 +9,6 @@
 .subckt rc_filter pwm_in vout vdd vss
 
 r_filt pwm_in vout 10k
-c_filt vout vss 100p
+c_filt vout vss 1n
 
 .ends rc_filter

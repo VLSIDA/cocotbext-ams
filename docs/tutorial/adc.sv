@@ -2,19 +2,19 @@
 //
 // A single fast clock (clk) drives the PWM counter and is divided down
 // internally to produce the SAR clock.  The comparator is latched once
-// per bit by the SAR controller's comp_latch output.
+// per bit by the SAR controller's comp_clk output.
 //
 // Clock tree (all derived from clk):
 //   clk          -> PWM counter (e.g., 1 GHz)
 //   clk/SAR_DIV  -> SAR step clock (e.g., /100 = 10 MHz)
 //
 // The SAR controller waits SETTLE_CYCLES of the SAR clock between bit
-// decisions, then pulses comp_latch to trigger the comparator once.
+// decisions, then pulses comp_clk to trigger the comparator once.
 
 module adc #(
     parameter N_BITS        = 8,
     parameter SAR_DIV       = 100,  // clk divider for SAR clock
-    parameter SETTLE_CYCLES = 50    // SAR clock cycles to wait per bit
+    parameter SETTLE_CYCLES = 500   // SAR clock cycles to wait per bit
 )(
     input  wire              clk,        // fast clock (drives everything)
     input  wire              reset_n,
@@ -24,7 +24,7 @@ module adc #(
 );
     wire pwm_out;
     wire q, qb;
-    wire comp_latch;
+    wire comp_clk;
 
     // --- Clock divider ---
 
@@ -49,10 +49,10 @@ module adc #(
     // --- Datapath ---
 
     // Analog block: RC filter + latch comparator (SPICE via cocotbext-ams)
-    // comp_latch from SAR controller triggers comparator once per bit
+    // comp_clk from SAR controller triggers comparator once per bit
     pwm_dac u_analog (
         .pwm_in(pwm_out),
-        .clk(comp_latch),
+        .clk(comp_clk),
         .vin(vin),
         .q(q),
         .qb(qb)
@@ -76,6 +76,6 @@ module adc #(
         .comp_q(q),
         .value(value),
         .done(done),
-        .comp_latch(comp_latch)
+        .comp_clk(comp_clk)
     );
 endmodule
