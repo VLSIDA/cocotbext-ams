@@ -142,6 +142,9 @@ class NgspiceInterface:
         # Registered by bridge: pin_name -> (node_names, DigitalPin)
         self._output_pin_configs: dict[str, tuple[list[str], Any]] = {}
 
+        # Analog VCD writer — set by bridge when analog_vcd is requested
+        self._vcd_writer: Any = None
+
         # Error tracking
         self._error: Exception | None = None
 
@@ -230,9 +233,16 @@ class NgspiceInterface:
         if not vdata:
             return 0
         vva = vdata.contents
+        sim_time: float | None = None
         for i in range(vva.veccount):
             vv = vva.vecsa[i].contents
             raw_name = vv.name.decode("utf-8", errors="replace") if vv.name else ""
+
+            # The scale vector carries the simulation time
+            if vv.is_scale:
+                sim_time = vv.creal
+                continue
+
             # Store under all useful key forms so lookups are forgiving.
             # ngspice may report names like "tran1.v(d0)" or "v(d0)" or "d0".
             self._node_voltages[raw_name] = vv.creal
@@ -251,6 +261,15 @@ class NgspiceInterface:
 
         # Check for threshold crossings on registered output pins
         self._check_crossings()
+
+        # Write VCD data at full ngspice resolution
+        if self._vcd_writer is not None and sim_time is not None:
+            self._vcd_writer.write_values(
+                sim_time,
+                analog_values=self._node_voltages,
+                digital_values=self._prev_digital_values,
+            )
+
         return 0
 
     def _check_crossings(self) -> None:

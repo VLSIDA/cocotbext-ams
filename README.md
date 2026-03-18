@@ -113,7 +113,7 @@ async def test_my_block(dut):
     )
 
     bridge = MixedSignalBridge(dut, [block], max_sync_interval_ns=10)
-    await bridge.start(duration_ns=50_000)
+    await bridge.start(duration_ns=50_000, analog_vcd="analog.vcd")
 
     cocotb.start_soon(Clock(dut.clk, 100, "ns").start())
     await Timer(1, "us")
@@ -126,6 +126,11 @@ async def test_my_block(dut):
 
     await bridge.stop()
 ```
+
+The `analog_vcd` parameter writes a VCD file with `real`-typed signals at
+full ngspice resolution.  Load it alongside the HDL simulator's digital VCD
+in Surfer, GTKWave, or any viewer that supports real-valued VCD signals to
+see analog and digital waveforms together.
 
 ## API Reference
 
@@ -163,7 +168,7 @@ The main orchestrator.
 
 | Method | Description |
 |--------|-------------|
-| `await start(duration_ns)` | Load circuit, start co-simulation |
+| `await start(duration_ns, analog_vcd=None, vcd_nodes=None)` | Load circuit, start co-simulation. Pass `analog_vcd="file.vcd"` to record analog waveforms. `vcd_nodes` adds extra SPICE nodes beyond the auto-included output pins. |
 | `await stop()` | Halt simulation, release forced signals |
 | `set_analog_input(block, name, voltage)` | Change an analog input voltage at runtime |
 | `get_analog_voltage(block, node)` | Probe any SPICE node voltage |

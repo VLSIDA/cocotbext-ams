@@ -27,6 +27,7 @@ from cocotbext.ams._netlist import (
 )
 from cocotbext.ams._ngspice import NgspiceInterface
 from cocotbext.ams._pins import DigitalPin
+from cocotbext.ams._vcd import AnalogVcdWriter
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ class AnalogBlock:
         vdd: Supply voltage.
         vss: Ground voltage.
         tran_step: Transient analysis internal step size.
+        extra_lines: Additional SPICE lines to include in the generated
+            netlist (e.g., ``.include`` directives for PDK libraries).
     """
 
     name: str
@@ -56,6 +59,7 @@ class AnalogBlock:
     vdd: float = 1.8
     vss: float = 0.0
     tran_step: str = "0.1n"
+    extra_lines: list[str] = field(default_factory=list)
 
 
 class MixedSignalBridge:
@@ -129,11 +133,24 @@ class MixedSignalBridge:
         self._block_output_nodes: dict[str, dict[str, list[str]]] = {}
         self._block_analog_vsrc_names: dict[str, dict[str, str]] = {}
 
-    async def start(self, duration_ns: float) -> None:
+    async def start(
+        self,
+        duration_ns: float,
+        analog_vcd: str | Path | None = None,
+        vcd_nodes: list[str] | None = None,
+    ) -> None:
         """Start the mixed-signal co-simulation.
 
         Args:
             duration_ns: Total simulation duration in nanoseconds.
+            analog_vcd: Path for a VCD file recording analog node voltages
+                as ``real``-typed signals.  The VCD is written at full ngspice
+                resolution (every accepted timestep) and can be loaded
+                alongside the HDL simulator's digital VCD in Surfer, GTKWave,
+                or any viewer that supports real-valued VCD signals.
+                ``None`` (default) disables recording.
+            vcd_nodes: Additional SPICE node names to record in the analog
+                VCD.  Output pin nodes are always included automatically.
         """
         if self._running:
             raise RuntimeError("Bridge is already running")
@@ -145,6 +162,10 @@ class MixedSignalBridge:
 
         # Install the sync-point callback that bridges back into cocotb
         ngspice._on_sync_point = self._on_sync_point_resume
+
+        # Collect VCD registration info: analog (real) nodes and digital (wire) pins
+        vcd_analog_names: list[str] = []
+        vcd_digital_pins: list[tuple[str, int]] = []  # (pin_name, width)
 
         # Load circuits for each analog block
         for block in self._analog_blocks:
@@ -158,6 +179,7 @@ class MixedSignalBridge:
                 vss=block.vss,
                 tran_step=block.tran_step,
                 tran_stop=tran_stop,
+                extra_lines=block.extra_lines or None,
             )
             ngspice.load_circuit(netlist_lines)
 
@@ -172,6 +194,14 @@ class MixedSignalBridge:
                     node_names = output_nodes.get(pin_name, [])
                     if node_names:
                         ngspice._output_pin_configs[pin_name] = (node_names, pin)
+                        # Analog nodes (real): the raw SPICE voltages
+                        vcd_analog_names.extend(node_names)
+                        # Digital signal (wire): the digitized output value
+                        vcd_digital_pins.append((pin_name, pin.width))
+
+            # Include analog input nodes in VCD (real-valued)
+            for ain_name in block.analog_inputs:
+                vcd_analog_names.append(ain_name)
 
             # Cache analog input VSRC names (they are also EXTERNAL now)
             self._block_analog_vsrc_names[block.name] = {
@@ -192,6 +222,21 @@ class MixedSignalBridge:
                         self._monitor_digital_input(block, pin_name, pin)
                     )
 
+        # Set up VCD writer if requested
+        if analog_vcd is not None:
+            if vcd_nodes:
+                vcd_analog_names.extend(vcd_nodes)
+            vcd_writer = AnalogVcdWriter(analog_vcd)
+            # Register analog (real) signals for SPICE node voltages
+            for name in dict.fromkeys(vcd_analog_names):
+                vcd_writer.register_signal(name)
+            # Register digital (wire) signals for digitized output pins
+            for pin_name, width in vcd_digital_pins:
+                vcd_writer.register_digital_signal(pin_name, width)
+            vcd_writer.open()
+            vcd_writer.write_header()
+            ngspice._vcd_writer = vcd_writer
+
         # Set initial sync time
         ngspice._next_sync_time = self._max_sync_interval_sec
 
@@ -208,6 +253,12 @@ class MixedSignalBridge:
         await self._run_ngspice_tran(tran_step, f"{duration_ns}n")
 
         self._running = False
+
+        # Close analog VCD file
+        if ngspice._vcd_writer is not None:
+            ngspice._vcd_writer.close()
+            log.info("Analog VCD written to: %s", analog_vcd)
+
         log.info("Mixed-signal co-simulation finished")
 
     async def stop(self) -> None:
@@ -218,6 +269,9 @@ class MixedSignalBridge:
         self._running = False
 
         if self._ngspice is not None:
+            if self._ngspice._vcd_writer is not None:
+                self._ngspice._vcd_writer.close()
+                self._ngspice._vcd_writer = None
             self._ngspice.halt()
 
         # Release all forced output signals
