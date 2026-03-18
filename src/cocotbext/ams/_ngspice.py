@@ -136,6 +136,12 @@ class NgspiceInterface:
         # to be a @resume-decorated function that blocks until cocotb is done.
         self._on_sync_point: Any = None
 
+        # Crossing detection state
+        self._crossing_detected: bool = False
+        self._prev_digital_values: dict[str, int] = {}
+        # Registered by bridge: pin_name -> (node_names, DigitalPin)
+        self._output_pin_configs: dict[str, tuple[list[str], Any]] = {}
+
         # Error tracking
         self._error: Exception | None = None
 
@@ -242,7 +248,20 @@ class NgspiceInterface:
             if short.startswith("v(") and short.endswith(")"):
                 bare = short[2:-1]
                 self._node_voltages[bare] = vv.creal
+
+        # Check for threshold crossings on registered output pins
+        self._check_crossings()
         return 0
+
+    def _check_crossings(self) -> None:
+        """Check output pins for threshold crossings after voltage update."""
+        for pin_name, (node_names, pin) in self._output_pin_configs.items():
+            voltages = [self._node_voltages.get(n, 0.0) for n in node_names]
+            prev_val = self._prev_digital_values.get(pin_name)
+            new_val = pin.analog_to_digital(voltages, prev_value=prev_val)
+            if prev_val is not None and new_val != prev_val:
+                self._crossing_detected = True
+            self._prev_digital_values[pin_name] = new_val
 
     def _on_send_init_data(self, vdata: Any, ident: int, userdata: Any) -> int:
         return 0
@@ -282,18 +301,25 @@ class NgspiceInterface:
         """Synchronization callback — controls ngspice timestep advancement.
 
         Called by ngspice at each internal timestep. We use this to:
-        1. Clamp the timestep so ngspice doesn't overshoot the next sync point.
-        2. At sync points, call the @resume callback which blocks this thread
-           and lets the cocotb scheduler exchange signals + advance digital time.
+        1. On threshold crossing: immediately sync (event-driven).
+        2. At fallback interval: sync to bound time drift.
+        3. Otherwise: clamp delta so ngspice doesn't overshoot the next sync point.
         """
         if self._simulation_done:
+            return 0
+
+        # Event-driven sync: a threshold crossing was detected in SendData
+        if self._crossing_detected:
+            self._crossing_detected = False
+            self._spice_time = ckttime
+            if self._on_sync_point is not None:
+                self._on_sync_point()
             return 0
 
         time_to_sync = self._next_sync_time - ckttime
 
         if time_to_sync <= 0:
-            # Reached a sync point — hand control to cocotb via @resume callback.
-            # The bridge's _on_sync_point_resume advances _next_sync_time.
+            # Reached fallback sync point — hand control to cocotb.
             self._spice_time = ckttime
             if self._on_sync_point is not None:
                 self._on_sync_point()

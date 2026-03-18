@@ -1,12 +1,16 @@
-"""MixedSignalBridge: time-synchronized co-simulation orchestrator.
+"""MixedSignalBridge: event-driven co-simulation orchestrator.
 
-Coordinates lock-step simulation between cocotb (digital) and ngspice (analog),
-exchanging signals at periodic sync points.
+Coordinates co-simulation between cocotb (digital) and ngspice (analog).
+Synchronization is event-driven: threshold crossings on analog outputs
+trigger immediate sync, while a configurable maximum interval provides
+a fallback ceiling. Digital-to-analog updates happen asynchronously via
+ValueChange monitors — no sync overhead.
 """
 
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,7 +18,7 @@ from typing import Any
 import cocotb
 from cocotb._bridge import bridge, resume
 from cocotb.handle import Force, Release
-from cocotb.triggers import Timer
+from cocotb.triggers import Timer, ValueChange
 
 from cocotbext.ams._netlist import (
     generate_netlist,
@@ -55,42 +59,70 @@ class AnalogBlock:
 
 
 class MixedSignalBridge:
-    """Orchestrates lock-step co-simulation between cocotb and ngspice.
+    """Orchestrates event-driven co-simulation between cocotb and ngspice.
 
-    The bridge alternates between running ngspice for one sync period
-    and advancing the cocotb simulation for one sync period, exchanging
-    digital/analog signal values at each sync point.
+    Synchronization is triggered by two mechanisms:
+    1. **Event-driven:** When an analog output crosses a digital threshold,
+       ngspice immediately syncs to update the Verilog signal.
+    2. **Fallback interval:** A configurable maximum interval ensures sync
+       happens even when no crossings occur, bounding time drift.
+
+    Digital-to-analog updates (Verilog -> SPICE) happen asynchronously via
+    ``ValueChange`` monitor coroutines that update the VSRC dict directly.
+    No sync overhead is needed because ngspice reads VSRCs on every
+    internal evaluation step.
 
     Thread model:
         - ngspice runs a blocking ``tran`` command inside a ``@bridge`` thread.
-        - At each sync point, the GetSyncData callback blocks the ngspice thread
-          and calls back into cocotb via ``@resume`` to exchange signals and
-          advance digital time.
-        - This avoids polling and the double-thread problem of using ``bg_run``
-          inside a ``@bridge`` thread.
+        - At each sync point (event or fallback), the GetSyncData callback
+          blocks the ngspice thread and calls back into cocotb via ``@resume``
+          to force new digital values and advance digital time.
 
     Args:
         dut: cocotb DUT handle.
         analog_blocks: List of AnalogBlock descriptions.
-        sync_period_ns: Synchronization interval in nanoseconds.
+        max_sync_interval_ns: Maximum time between sync points in nanoseconds.
+            Sync also occurs immediately on any threshold crossing.
         ngspice_lib: Path to libngspice.so (auto-detected if None).
+        sync_period_ns: Deprecated alias for max_sync_interval_ns.
     """
 
     def __init__(
         self,
         dut: Any,
         analog_blocks: list[AnalogBlock],
-        sync_period_ns: float = 1.0,
+        max_sync_interval_ns: float | None = None,
         ngspice_lib: str | Path | None = None,
+        sync_period_ns: float | None = None,
     ) -> None:
+        # Handle deprecated sync_period_ns parameter
+        if sync_period_ns is not None:
+            if max_sync_interval_ns is not None:
+                raise ValueError(
+                    "Cannot specify both 'max_sync_interval_ns' and "
+                    "'sync_period_ns' (deprecated alias)"
+                )
+            warnings.warn(
+                "'sync_period_ns' is deprecated, use 'max_sync_interval_ns' instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            max_sync_interval_ns = sync_period_ns
+
+        if max_sync_interval_ns is None:
+            max_sync_interval_ns = 100.0
+
         self._dut = dut
         self._analog_blocks = analog_blocks
-        self._sync_period_ns = sync_period_ns
-        self._sync_period_sec = sync_period_ns * 1e-9
+        self._max_sync_interval_ns = max_sync_interval_ns
+        self._max_sync_interval_sec = max_sync_interval_ns * 1e-9
         self._ngspice_lib = ngspice_lib
 
         self._ngspice: NgspiceInterface | None = None
         self._running = False
+
+        # Track SPICE time at last sync for dynamic Timer advance
+        self._last_sync_spice_time: float = 0.0
 
         # Resolved handles and mappings (populated during start)
         self._block_vsrc_names: dict[str, dict[str, list[str]]] = {}
@@ -109,6 +141,7 @@ class MixedSignalBridge:
         ngspice = NgspiceInterface(self._ngspice_lib)
         self._ngspice = ngspice
         self._running = True
+        self._last_sync_spice_time = 0.0
 
         # Install the sync-point callback that bridges back into cocotb
         ngspice._on_sync_point = self._on_sync_point_resume
@@ -132,6 +165,14 @@ class MixedSignalBridge:
             self._block_vsrc_names[block.name] = get_vsrc_names(block.digital_pins)
             self._block_output_nodes[block.name] = get_output_node_names(block.digital_pins)
 
+            # Register output pin configs with NgspiceInterface for crossing detection
+            output_nodes = self._block_output_nodes[block.name]
+            for pin_name, pin in block.digital_pins.items():
+                if pin.direction == "output":
+                    node_names = output_nodes.get(pin_name, [])
+                    if node_names:
+                        ngspice._output_pin_configs[pin_name] = (node_names, pin)
+
             # Cache analog input VSRC names (they are also EXTERNAL now)
             self._block_analog_vsrc_names[block.name] = {
                 name: f"v_{name}" for name in block.analog_inputs
@@ -144,12 +185,19 @@ class MixedSignalBridge:
             # Set initial digital input VSRC values from Verilog signal states
             self._update_vsrc_from_digital(block)
 
+            # Spawn ValueChange monitor coroutines for each input pin
+            for pin_name, pin in block.digital_pins.items():
+                if pin.direction == "input":
+                    cocotb.start_soon(
+                        self._monitor_digital_input(block, pin_name, pin)
+                    )
+
         # Set initial sync time
-        ngspice._next_sync_time = self._sync_period_sec
+        ngspice._next_sync_time = self._max_sync_interval_sec
 
         log.info(
-            "Starting mixed-signal co-simulation: sync_period=%.1fns, duration=%.1fns",
-            self._sync_period_ns, duration_ns,
+            "Starting mixed-signal co-simulation: max_sync_interval=%.1fns, duration=%.1fns",
+            self._max_sync_interval_ns, duration_ns,
         )
 
         # Run ngspice blocking tran in a @bridge thread.
@@ -232,11 +280,12 @@ class MixedSignalBridge:
     async def _on_sync_point_resume(self) -> None:
         """Called from the ngspice thread (via GetSyncData) at each sync point.
 
-        This @resume function runs in the cocotb scheduler context:
+        Sync points are triggered either by a threshold crossing (event-driven)
+        or by the fallback interval ceiling. This @resume function runs in
+        the cocotb scheduler context:
         1. Reads analog outputs and forces them onto Verilog signals.
-        2. Advances digital simulation by one sync period.
-        3. Reads Verilog inputs and updates VSRC values for the next ngspice step.
-        4. Advances _next_sync_time for the next sync point.
+        2. Advances digital simulation by the actual elapsed SPICE time.
+        3. Advances _next_sync_time for the next fallback interval.
         """
         assert self._ngspice is not None
 
@@ -247,15 +296,67 @@ class MixedSignalBridge:
         for block in self._analog_blocks:
             self._read_analog_outputs(block)
 
-        # Advance digital simulation
-        await Timer(self._sync_period_ns, "ns")
+        # Advance digital simulation by actual elapsed time
+        elapsed_sec = self._ngspice._spice_time - self._last_sync_spice_time
+        elapsed_ns = elapsed_sec * 1e9
+        if elapsed_ns > 0:
+            await Timer(round(elapsed_ns * 1000), "ps")
+        self._last_sync_spice_time = self._ngspice._spice_time
 
-        # Digital -> Analog: read Verilog inputs, update VSRC values
-        for block in self._analog_blocks:
-            self._update_vsrc_from_digital(block)
+        # Advance fallback sync time
+        self._ngspice._next_sync_time = (
+            self._ngspice._spice_time + self._max_sync_interval_sec
+        )
 
-        # Advance sync time for the next ngspice interval
-        self._ngspice._next_sync_time += self._sync_period_sec
+    # ------------------------------------------------------------------ #
+    # Internal: digital-to-analog monitors
+    # ------------------------------------------------------------------ #
+
+    async def _monitor_digital_input(
+        self, block: AnalogBlock, pin_name: str, pin: DigitalPin,
+    ) -> None:
+        """Monitor a Verilog input signal and update VSRC values on change.
+
+        This coroutine uses ``await ValueChange(handle)`` to react to HDL
+        signal changes with zero sync overhead — the updated VSRC dict is
+        read by ngspice on its next internal evaluation step.
+        """
+        assert self._ngspice is not None
+        vsrc_map = self._block_vsrc_names.get(block.name, {})
+        vsrc_names = vsrc_map.get(pin_name, [])
+        if not vsrc_names:
+            return
+
+        try:
+            handle = self._resolve_signal(block.name, pin_name)
+        except AttributeError:
+            log.warning(
+                "Cannot monitor input %s.%s -- handle not found",
+                block.name, pin_name,
+            )
+            return
+
+        while self._running:
+            try:
+                await ValueChange(handle)
+            except Exception:
+                # ValueChange may not be supported on all simulators;
+                # fall back to letting sync points handle D→A updates.
+                log.debug(
+                    "ValueChange not available for %s.%s, "
+                    "falling back to sync-point updates",
+                    block.name, pin_name,
+                )
+                return
+
+            try:
+                val = int(handle.value)
+            except (AttributeError, ValueError):
+                val = 0
+
+            voltages = pin.digital_to_analog(val)
+            for vsrc_name, voltage in zip(vsrc_names, voltages):
+                self._ngspice.set_vsrc(vsrc_name, voltage)
 
     # ------------------------------------------------------------------ #
     # Internal: signal exchange
@@ -305,8 +406,9 @@ class MixedSignalBridge:
                 v = self._ngspice.get_node_voltage(node)
                 voltages.append(v)
 
-            # Convert to digital value
-            digital_val = pin.analog_to_digital(voltages)
+            # Convert to digital value (use prev_value for hysteresis)
+            prev_val = self._ngspice._prev_digital_values.get(pin_name)
+            digital_val = pin.analog_to_digital(voltages, prev_value=prev_val)
 
             # Force onto Verilog signal
             try:

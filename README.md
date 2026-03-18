@@ -25,13 +25,21 @@ MixedSignalBridge (orchestrator)
   (Icarus/Verilator)    (ngspice 45+)
 ```
 
-The bridge runs ngspice and the HDL simulator in **lock-step**: ngspice runs for
-one sync period, signals are exchanged, then cocotb advances the digital
-simulation by one sync period. This repeats until the simulation ends.
+The bridge uses **event-driven synchronization**: instead of exchanging signals
+at a fixed interval, it reacts to actual signal changes:
+
+- **Digital → Analog:** `ValueChange` monitor coroutines update ngspice voltage
+  sources the instant a Verilog signal changes — no sync overhead needed since
+  ngspice reads the values on every internal evaluation step.
+- **Analog → Digital:** Threshold-crossing detection in ngspice's `SendData`
+  callback triggers an immediate sync when a SPICE output crosses a digital
+  threshold, forcing the new value onto the Verilog signal.
+- A configurable **maximum sync interval** (default 100 ns) ensures periodic
+  fallback synchronization even when no crossings occur.
 
 **Signal bridging:**
-- **Digital -> Analog:** Verilog 1/0 mapped to VDD/VSS via EXTERNAL voltage sources in SPICE
-- **Analog -> Digital:** SPICE node voltage compared against a threshold, result forced onto Verilog output
+- **Digital → Analog:** Verilog 1/0 mapped to VDD/VSS via EXTERNAL voltage sources in SPICE
+- **Analog → Digital:** SPICE node voltage compared against a threshold (with optional hysteresis), result forced onto Verilog output
 - **Analog-only pins:** remain X in Verilog, fully simulated in SPICE
 
 ## Prerequisites
@@ -104,7 +112,7 @@ async def test_my_block(dut):
         vdd=1.8,
     )
 
-    bridge = MixedSignalBridge(dut, [block], sync_period_ns=10)
+    bridge = MixedSignalBridge(dut, [block], max_sync_interval_ns=10)
     await bridge.start(duration_ns=50_000)
 
     cocotb.start_soon(Clock(dut.clk, 100, "ns").start())
@@ -121,17 +129,18 @@ async def test_my_block(dut):
 
 ## API Reference
 
-### `DigitalPin(direction, width=1, vdd=1.8, vss=0.0, threshold=None)`
+### `DigitalPin(direction, width=1, vdd=1.8, vss=0.0, threshold=None, hysteresis=0.0)`
 
 Configures how a pin is bridged between digital and analog domains.
 
-| Parameter   | Description |
-|-------------|-------------|
-| `direction` | `"input"` (digital drives analog) or `"output"` (analog drives digital) |
-| `width`     | Bit width. Multi-bit pins get one SPICE source/probe per bit. |
-| `vdd`       | Logic-high voltage level |
-| `vss`       | Logic-low voltage level |
-| `threshold` | Voltage threshold for A/D conversion. Default: `(vdd + vss) / 2` |
+| Parameter    | Description |
+|--------------|-------------|
+| `direction`  | `"input"` (digital drives analog) or `"output"` (analog drives digital) |
+| `width`      | Bit width. Multi-bit pins get one SPICE source/probe per bit. |
+| `vdd`        | Logic-high voltage level |
+| `vss`        | Logic-low voltage level |
+| `threshold`  | Voltage threshold for A/D conversion. Default: `(vdd + vss) / 2` |
+| `hysteresis` | Total hysteresis band. When > 0, rising transitions require `>= threshold + hysteresis/2` and falling transitions require `< threshold - hysteresis/2`. Prevents rapid oscillation around the threshold. Default: `0.0` |
 
 ### `AnalogBlock(name, spice_file, subcircuit, ...)`
 
@@ -148,7 +157,7 @@ Describes an analog block (SPICE subcircuit) to be co-simulated.
 | `vss`           | Ground voltage (default 0.0) |
 | `tran_step`     | SPICE transient step size (default `"0.1n"`) |
 
-### `MixedSignalBridge(dut, analog_blocks, sync_period_ns=1.0, ngspice_lib=None)`
+### `MixedSignalBridge(dut, analog_blocks, max_sync_interval_ns=100.0, ngspice_lib=None)`
 
 The main orchestrator.
 
@@ -159,14 +168,17 @@ The main orchestrator.
 | `set_analog_input(block, name, voltage)` | Change an analog input voltage at runtime |
 | `get_analog_voltage(block, node)` | Probe any SPICE node voltage |
 
-### Sync period selection
+> **Migration note:** The old `sync_period_ns` parameter still works but emits a `DeprecationWarning`. Rename it to `max_sync_interval_ns`.
 
-The `sync_period_ns` controls how often signals are exchanged between simulators.
-Smaller values increase accuracy but slow simulation:
+### Sync interval selection
 
-- **1-10 ns:** High accuracy, good for clock-speed signals
-- **50-100 ns:** Good balance for most designs
-- **1000+ ns:** Fast but may miss fast transitions
+Synchronization is primarily **event-driven** — threshold crossings on analog
+outputs trigger immediate sync. The `max_sync_interval_ns` parameter sets a
+ceiling that bounds time drift and ensures digital-side events are processed:
+
+- **10-50 ns:** Tight ceiling, suitable when digital-side timing is critical
+- **100 ns (default):** Good balance for most designs
+- **1000+ ns:** Loose ceiling, relies mostly on event-driven sync
 
 ## Examples
 
@@ -181,15 +193,19 @@ The bridge uses cocotb's `@bridge` / `@resume` mechanism for thread
 synchronization:
 
 1. `@bridge` runs ngspice's blocking `tran` command in a dedicated thread.
-2. ngspice's `GetSyncData` callback fires at each internal timestep.
-3. When a sync point is reached, the callback calls a `@resume` function that
+2. `GetVSRCData` fires on every ngspice evaluation step, reading the
+   `_vsrc_values` dict (updated asynchronously by `ValueChange` monitors).
+3. `SendData` fires after each accepted timestep — the bridge checks all
+   output pin voltages against their thresholds (with hysteresis).
+4. `GetSyncData` fires at each internal timestep. If a crossing was detected
+   (or the fallback interval elapsed), it calls a `@resume` function that
    blocks the ngspice thread and transfers control to the cocotb scheduler.
-4. The cocotb scheduler exchanges signals and advances digital time via
-   `await Timer(...)`.
-5. When the `@resume` function returns, the ngspice thread resumes.
+5. The cocotb scheduler forces new digital values onto Verilog and advances
+   digital time by the actual elapsed SPICE time via `await Timer(...)`.
+6. When the `@resume` function returns, the ngspice thread resumes.
 
-This avoids polling and ensures no simulation time passes in either domain
-without explicit synchronization.
+This is event-driven: sync only happens when analog outputs actually cross
+a digital threshold, or at the fallback ceiling interval.
 
 ### Netlist augmentation
 

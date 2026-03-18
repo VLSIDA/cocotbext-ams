@@ -24,7 +24,7 @@ async def test_sar_adc(dut):
         vdd=1.8,
     )
 
-    bridge = MixedSignalBridge(dut, [adc], sync_period_ns=50)
+    bridge = MixedSignalBridge(dut, [adc], max_sync_interval_ns=50)
     await bridge.start(duration_ns=100_000)
 
     # Start clock

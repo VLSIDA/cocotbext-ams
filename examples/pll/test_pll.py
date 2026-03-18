@@ -89,7 +89,7 @@ async def test_pll_lock(dut):
         vdd=1.8,
     )
 
-    bridge = MixedSignalBridge(dut, [pll_block], sync_period_ns=5.0)
+    bridge = MixedSignalBridge(dut, [pll_block], max_sync_interval_ns=5.0)
     await bridge.start(duration_ns=50_000)
 
     # Start reference clock
