@@ -61,9 +61,9 @@ HDL simulator's digital VCD to see everything together:
 
 ![PWM DAC Waveforms](docs/tutorial/images/pwm_dac_waveforms.png)
 
-*Digital PWM and clock (top), analog filtered voltage and reference (middle),
-and comparator output (bottom).  See the [full tutorial](docs/tutorial/index.md)
-for details.*
+*SAR ADC binary search: RC-filtered DAC output converging to vin (top),
+comparator output q (second), SAR value register (third), and done signal
+(bottom).  See the [full tutorial](docs/tutorial/index.md) for details.*
 
 ## Prerequisites
 
