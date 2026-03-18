@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cocotbext-ams"
-version = "0.1.0"
+version = "0.0.1"
 description = "ngspice bridge for cocotb — open-source mixed-signal co-simulation"
 requires-python = ">=3.10"
 license = "BSD-3-Clause"
