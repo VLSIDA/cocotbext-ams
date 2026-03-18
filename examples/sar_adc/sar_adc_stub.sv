@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Matthew Guthaus
+// See LICENSE for details.
+
 // Verilog black-box stub for the SAR ADC analog block.
 // Output ports are reg so the bridge can Force values onto them.
 // The analog-only port (ain) remains X in the digital domain.

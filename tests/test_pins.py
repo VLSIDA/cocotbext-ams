@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, Matthew Guthaus
+# See LICENSE for details.
+
 """Unit tests for DigitalPin and crossing detection."""
 
 from cocotbext.ams._pins import DigitalPin

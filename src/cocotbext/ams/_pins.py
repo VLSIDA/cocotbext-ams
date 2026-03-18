@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, Matthew Guthaus
+# See LICENSE for details.
+
 """DigitalPin dataclass for configuring digital-analog signal mapping."""
 
 from __future__ import annotations

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Matthew Guthaus
+// See LICENSE for details.
+
 // Complete SAR ADC module.
 //
 // A single fast clock (clk) drives the PWM counter and is divided down

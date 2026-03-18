@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Matthew Guthaus
+// See LICENSE for details.
+
 // PWM generator: produces a PWM output from an N-bit duty cycle register.
 //
 // One PWM period = 2^N clock cycles.

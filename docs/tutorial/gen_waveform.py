@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, Matthew Guthaus
+# See LICENSE for details.
+
 """Generate example waveform image for the SAR ADC tutorial.
 
 This creates a realistic plot showing the SAR controller binary-searching

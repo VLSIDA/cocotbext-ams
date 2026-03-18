@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, Matthew Guthaus
+# See LICENSE for details.
+
 """cocotbext-ams: ngspice bridge for cocotb mixed-signal co-simulation."""
 
 __version__ = "0.0.1"

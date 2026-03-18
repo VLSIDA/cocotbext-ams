@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Matthew Guthaus
+// See LICENSE for details.
+
 // Successive-approximation controller for PWM DAC.
 //
 // After setting each trial bit, waits SETTLE_CYCLES of sar_clk for

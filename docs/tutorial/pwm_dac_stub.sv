@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Matthew Guthaus
+// See LICENSE for details.
+
 // Verilog black-box stub for the PWM DAC analog block.
 //
 // - pwm_in, clk: digital inputs (Verilog -> SPICE)

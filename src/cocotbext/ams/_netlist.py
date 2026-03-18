@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, Matthew Guthaus
+# See LICENSE for details.
+
 """SPICE netlist augmentation for mixed-signal co-simulation.
 
 Generates a wrapper netlist that includes the user's subcircuit and adds

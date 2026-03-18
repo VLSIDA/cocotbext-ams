@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, Matthew Guthaus
+# See LICENSE for details.
+
 """cocotb test for PLL mixed-signal co-simulation example.
 
 This test implements a digital phase-frequency detector (PFD) and a

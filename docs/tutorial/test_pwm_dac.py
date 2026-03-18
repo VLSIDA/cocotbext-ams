@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026, Matthew Guthaus
+# See LICENSE for details.
+
 """cocotb test for PWM DAC mixed-signal co-simulation tutorial.
 
 Demonstrates cocotbext-ams with a hardware successive-approximation

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Matthew Guthaus
+// See LICENSE for details.
+
 // Verilog black-box stub for the PLL analog block.
 //
 // The digital side implements the phase-frequency detector (PFD) and

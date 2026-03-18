@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Matthew Guthaus
+// See LICENSE for details.
+
 // Testbench top for PLL mixed-signal co-simulation example.
 //
 // The testbench instantiates the PLL stub and provides the

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026, Matthew Guthaus
+// See LICENSE for details.
+
 // Testbench for SAR ADC mixed-signal co-simulation tutorial.
 //
 // A single fast clock drives everything.  Internally, the adc module
