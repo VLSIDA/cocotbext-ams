@@ -486,9 +486,15 @@ class MixedSignalBridge:
                 pass
 
     def _resolve_signal(self, block_name: str, pin_name: str) -> Any:
-        """Resolve a cocotb signal handle for a pin on an analog block."""
+        """Resolve a cocotb signal handle for a pin on an analog block.
+
+        Supports hierarchical block names (e.g., ``"dut.u_analog"``) by
+        traversing each component of the dotted path.
+        """
         try:
-            block_handle = getattr(self._dut, block_name)
-            return getattr(block_handle, pin_name)
+            handle = self._dut
+            for part in block_name.split("."):
+                handle = getattr(handle, part)
+            return getattr(handle, pin_name)
         except AttributeError:
             return getattr(self._dut, pin_name)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate example waveform image for the PWM DAC tutorial.
+"""Generate example waveform image for the SAR ADC tutorial.
 
-This creates a realistic plot of what you'd see viewing the analog and
-digital VCD files together, without needing ngspice or a simulator.
+This creates a realistic plot showing the SAR controller binary-searching
+duty cycles, with the RC-filtered voltage stepping toward vref.
 """
 
 import numpy as np
@@ -22,87 +22,147 @@ def rc_filter(t, signal, r=10e3, c=100e-12):
     return out
 
 
-def generate_pwm(t, period, duty):
-    """Generate PWM signal."""
-    phase = (t % period) / period
-    return (phase < duty).astype(float) * 1.8
+def generate_pwm(t, period, duty_values, step_duration):
+    """Generate PWM signal with duty cycle changing at SAR step boundaries."""
+    signal = np.zeros_like(t)
+    for i, tv in enumerate(t):
+        step_idx = min(int(tv / step_duration), len(duty_values) - 1)
+        duty = duty_values[step_idx]
+        phase = (tv % period) / period
+        signal[i] = 1.8 if phase < duty else 0.0
+    return signal
+
+
+def sar_search(vref, vdd=1.8, n_bits=8):
+    """Simulate SAR binary search, returning duty values per step."""
+    target = vref / vdd
+    result = 0.0
+    duties = []
+    for i in range(n_bits):
+        bit_weight = 0.5 ** (i + 1)
+        trial = result + bit_weight
+        # Compare: if trial*vdd > vref, clear bit; else keep
+        if trial * vdd > vref:
+            pass  # don't keep the bit
+        else:
+            result = trial
+        # After decision, set next bit tentatively (except last step)
+        if i < n_bits - 1:
+            duties.append(result + 0.5 ** (i + 2))
+        else:
+            duties.append(result)
+    return duties
 
 
 def main():
-    # Time axis: 20us, 1ps resolution for smooth curves
+    vdd = 1.8
+    vref = 0.9
+    n_bits = 8
+    step_us = 7.0  # SAR step duration in μs
+    pwm_period = 2.56e-6  # 256 × 10ns
+
+    # SAR search produces duty values per step
+    duty_values = sar_search(vref, vdd, n_bits)
+
+    # Time axis
     dt = 100e-12
-    t_total = 20e-6
+    t_total = (n_bits * step_us + 10) * 1e-6  # total time
     t = np.arange(0, t_total, dt)
     t_us = t * 1e6
 
-    # PWM: 100ns period, 75% duty cycle
-    pwm = generate_pwm(t, period=100e-9, duty=0.75)
+    # Initial settle period (1μs reset + 5μs settle)
+    settle_offset = 6e-6
+    # Duty values with initial 50% during settle
+    full_duties = [0.5] + duty_values  # index 0 = settle period
+    step_dur = step_us * 1e-6
+
+    def get_duty(tv):
+        if tv < settle_offset:
+            return 0.5  # MSB set = 128/256 = 50%
+        step_idx = min(int((tv - settle_offset) / step_dur), len(duty_values) - 1)
+        return duty_values[step_idx]
+
+    # Generate PWM with changing duty
+    pwm = np.array([1.8 if (tv % pwm_period) / pwm_period < get_duty(tv) else 0.0
+                     for tv in t])
 
     # RC filtered voltage
     v_filtered = rc_filter(t, pwm)
 
-    # Vref: 0.9V for first 12us, then 1.5V
-    vref = np.where(t < 12e-6, 0.9, 1.5)
+    # Vref line
+    vref_line = np.full_like(t, vref)
 
-    # Comparator output (clocked at 200ns period, latches on rising edge)
-    clk_period = 200e-9
-    clk = ((t % clk_period) / clk_period > 0.5).astype(float) * 1.8
+    # Comparator output: q=1 when v_filtered > vref (sampled on comp_clk)
+    comp_period = 200e-9
     q = np.zeros_like(t)
-    last_clk = 0
     q_val = 0
+    last_clk = 0
     for i in range(len(t)):
-        c = 1 if clk[i] > 0.9 else 0
-        if c == 1 and last_clk == 0:  # rising edge
-            q_val = 1.8 if v_filtered[i] > vref[i] else 0.0
+        c = 1 if (t[i] % comp_period) / comp_period > 0.5 else 0
+        if c == 1 and last_clk == 0:
+            q_val = 1.8 if v_filtered[i] > vref else 0.0
         last_clk = c
         q[i] = q_val
 
+    # Duty register value (8-bit, as integer)
+    duty_int = np.array([int(get_duty(tv) * 256) for tv in t])
+
+    # Done signal
+    done_time = settle_offset + n_bits * step_dur
+    done = np.where(t >= done_time, 1.8, 0.0)
+
+    # SAR clock
+    sar_clk = np.zeros_like(t)
+    for i, tv in enumerate(t):
+        if tv >= settle_offset:
+            phase = ((tv - settle_offset) % step_dur) / step_dur
+            sar_clk[i] = 1.8 if phase > 0.5 else 0.0
+
     # --- Plot ---
-    fig = plt.figure(figsize=(12, 7))
-    gs = gridspec.GridSpec(5, 1, height_ratios=[1, 1, 2, 1, 1],
+    fig = plt.figure(figsize=(14, 9))
+    gs = gridspec.GridSpec(6, 1, height_ratios=[1.5, 1, 2.5, 1, 1, 0.8],
                            hspace=0.15, top=0.94, bottom=0.06,
                            left=0.10, right=0.96)
 
     colors = {
         'pwm': '#4A90D9',
-        'clk': '#7B68EE',
+        'sar_clk': '#7B68EE',
         'filtered': '#E74C3C',
         'vref': '#2ECC71',
         'q': '#F39C12',
+        'duty': '#9B59B6',
+        'done': '#1ABC9C',
     }
 
-    # Panel 1: PWM (digital)
+    # Panel 1: PWM output (digital, density changes)
     ax1 = fig.add_subplot(gs[0])
     ax1.fill_between(t_us, 0, pwm, step='post', alpha=0.3, color=colors['pwm'])
-    ax1.step(t_us, pwm, where='post', color=colors['pwm'], linewidth=0.8)
-    ax1.set_ylabel('pwm_in', fontsize=9, fontweight='bold')
+    ax1.step(t_us, pwm, where='post', color=colors['pwm'], linewidth=0.5)
+    ax1.set_ylabel('pwm_out', fontsize=9, fontweight='bold')
     ax1.set_ylim(-0.2, 2.2)
     ax1.set_yticks([0, 1.8])
     ax1.set_yticklabels(['0', '1.8V'], fontsize=7)
     ax1.tick_params(labelbottom=False)
-    ax1.text(0.01, 0.85, 'digital', transform=ax1.transAxes, fontsize=7,
-             color='gray', style='italic')
+    ax1.text(0.01, 0.85, 'digital (from pwm_gen)', transform=ax1.transAxes,
+             fontsize=7, color='gray', style='italic')
 
-    # Panel 2: clk (digital)
+    # Panel 2: SAR clock
     ax2 = fig.add_subplot(gs[1], sharex=ax1)
-    ax2.fill_between(t_us, 0, clk, step='post', alpha=0.3, color=colors['clk'])
-    ax2.step(t_us, clk, where='post', color=colors['clk'], linewidth=0.8)
-    ax2.set_ylabel('clk', fontsize=9, fontweight='bold')
+    ax2.fill_between(t_us, 0, sar_clk, step='post', alpha=0.2, color=colors['sar_clk'])
+    ax2.step(t_us, sar_clk, where='post', color=colors['sar_clk'], linewidth=0.8)
+    ax2.set_ylabel('sar_clk', fontsize=9, fontweight='bold')
     ax2.set_ylim(-0.2, 2.2)
     ax2.set_yticks([0, 1.8])
     ax2.set_yticklabels(['0', '1.8V'], fontsize=7)
     ax2.tick_params(labelbottom=False)
-    ax2.text(0.01, 0.85, 'digital', transform=ax2.transAxes, fontsize=7,
-             color='gray', style='italic')
 
     # Panel 3: Analog signals (v_filtered + vref)
     ax3 = fig.add_subplot(gs[2], sharex=ax1)
     ax3.plot(t_us, v_filtered, color=colors['filtered'], linewidth=1.2,
              label='v_filtered (real)')
-    ax3.plot(t_us, vref, color=colors['vref'], linewidth=1.2, linestyle='--',
-             label='vref (real)')
-    ax3.axhline(y=0.9, color=colors['vref'], linewidth=0.5, alpha=0.3)
-    ax3.axhline(y=1.5, color=colors['vref'], linewidth=0.5, alpha=0.3)
+    ax3.plot(t_us, vref_line, color=colors['vref'], linewidth=1.2, linestyle='--',
+             label=f'vref = {vref}V')
+    ax3.axhline(y=vref, color=colors['vref'], linewidth=0.5, alpha=0.3)
     ax3.set_ylabel('Voltage (V)', fontsize=9, fontweight='bold')
     ax3.set_ylim(-0.1, 2.0)
     ax3.set_yticks([0, 0.45, 0.9, 1.35, 1.8])
@@ -111,22 +171,13 @@ def main():
     ax3.text(0.01, 0.92, 'analog (from VCD real signals)', transform=ax3.transAxes,
              fontsize=7, color='gray', style='italic')
 
-    # Annotate the crossing
-    cross_idx = np.where((t > 12e-6) & (v_filtered < vref))[0]
-    if len(cross_idx) > 0:
-        ax3.annotate('vref raised\nto 1.5V', xy=(12, 1.5), fontsize=7,
-                     color=colors['vref'],
-                     xytext=(13, 1.75), arrowprops=dict(arrowstyle='->', color=colors['vref']))
+    # Annotate SAR steps
+    for i in range(min(4, n_bits)):
+        step_t = settle_offset * 1e6 + i * step_us
+        ax3.axvline(x=step_t, color='gray', linewidth=0.5, alpha=0.3, linestyle=':')
+        ax3.text(step_t + 0.3, 1.85, f'bit {7-i}', fontsize=6, color='gray')
 
-    settle_idx = np.where((t > 1e-6) & (v_filtered > 0.9))[0]
-    if len(settle_idx) > 0:
-        t_cross = t_us[settle_idx[0]]
-        ax3.annotate('threshold\ncrossing', xy=(t_cross, 0.9), fontsize=7,
-                     color=colors['filtered'],
-                     xytext=(t_cross + 1.5, 0.45),
-                     arrowprops=dict(arrowstyle='->', color=colors['filtered']))
-
-    # Panel 4: q (digital output from comparator)
+    # Panel 4: Comparator output q
     ax4 = fig.add_subplot(gs[3], sharex=ax1)
     ax4.fill_between(t_us, 0, q, step='post', alpha=0.3, color=colors['q'])
     ax4.step(t_us, q, where='post', color=colors['q'], linewidth=1.0)
@@ -135,30 +186,40 @@ def main():
     ax4.set_yticks([0, 1.8])
     ax4.set_yticklabels(['0', '1.8V'], fontsize=7)
     ax4.tick_params(labelbottom=False)
-    ax4.text(0.01, 0.85, 'digital (from comparator)', transform=ax4.transAxes,
+    ax4.text(0.01, 0.85, 'comparator output', transform=ax4.transAxes,
              fontsize=7, color='gray', style='italic')
 
-    # Panel 5: qb (complement)
-    qb = np.where(q > 0.9, 0.0, 1.8)
+    # Panel 5: Duty register + done
     ax5 = fig.add_subplot(gs[4], sharex=ax1)
-    ax5.fill_between(t_us, 0, qb, step='post', alpha=0.2, color=colors['q'])
-    ax5.step(t_us, qb, where='post', color=colors['q'], linewidth=1.0, alpha=0.7)
-    ax5.set_ylabel('qb', fontsize=9, fontweight='bold')
-    ax5.set_ylim(-0.2, 2.2)
-    ax5.set_yticks([0, 1.8])
-    ax5.set_yticklabels(['0', '1.8V'], fontsize=7)
-    ax5.set_xlabel('Time (μs)', fontsize=9)
-    ax5.text(0.01, 0.85, 'digital (from comparator)', transform=ax5.transAxes,
+    ax5.step(t_us, duty_int, where='post', color=colors['duty'], linewidth=1.2,
+             label='duty[7:0]')
+    ax5.axhline(y=int(vref / vdd * 256), color=colors['vref'], linewidth=0.8,
+                linestyle=':', alpha=0.5, label=f'target ({int(vref/vdd*256)})')
+    ax5.set_ylabel('duty[7:0]', fontsize=9, fontweight='bold')
+    ax5.set_ylim(-10, 270)
+    ax5.set_yticks([0, 64, 128, 192, 256])
+    ax5.tick_params(labelbottom=False)
+    ax5.legend(loc='upper right', fontsize=7, framealpha=0.9)
+    ax5.text(0.01, 0.85, 'SAR register (converging)', transform=ax5.transAxes,
              fontsize=7, color='gray', style='italic')
 
-    ax1.set_xlim(0, 20)
+    # Panel 6: Done signal
+    ax6 = fig.add_subplot(gs[5], sharex=ax1)
+    ax6.fill_between(t_us, 0, done, step='post', alpha=0.3, color=colors['done'])
+    ax6.step(t_us, done, where='post', color=colors['done'], linewidth=1.0)
+    ax6.set_ylabel('done', fontsize=9, fontweight='bold')
+    ax6.set_ylim(-0.2, 2.2)
+    ax6.set_yticks([0, 1.8])
+    ax6.set_yticklabels(['0', '1'], fontsize=7)
+    ax6.set_xlabel('Time (μs)', fontsize=9)
 
-    fig.suptitle('PWM DAC Tutorial — Mixed-Signal Waveforms',
+    ax1.set_xlim(0, t_total * 1e6)
+
+    fig.suptitle('SAR ADC Tutorial — Binary Search for vref = 0.9V',
                  fontsize=12, fontweight='bold')
 
     plt.savefig('images/pwm_dac_waveforms.png', dpi=150)
-    plt.savefig('images/pwm_dac_waveforms.svg')
-    print("Generated images/pwm_dac_waveforms.png and .svg")
+    print("Generated images/pwm_dac_waveforms.png")
 
 
 if __name__ == "__main__":

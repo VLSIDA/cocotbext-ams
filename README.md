@@ -8,7 +8,7 @@ An ngspice bridge for [cocotb](https://github.com/cocotb/cocotb), enabling open-
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-- [Tutorial: PWM DAC with Latch Comparator](docs/tutorial/index.md)
+- [Tutorial: PWM DAC with SAR Controller](docs/tutorial/index.md)
 - [API Reference](#api-reference)
 - [Examples](#examples)
 - [Architecture Details](#architecture-details)
@@ -211,10 +211,11 @@ ceiling that bounds time drift and ensures digital-side events are processed:
 
 ## Tutorial
 
-**[PWM DAC with Latch Comparator](docs/tutorial/index.md)** — A complete
-walkthrough of a mixed-signal co-simulation: digital PWM → RC filter → sky130
-latch comparator.  Covers both data paths, runtime analog control, VCD export,
-and waveform viewing.
+**[PWM DAC with SAR Controller](docs/tutorial/index.md)** — A complete
+walkthrough of a mixed-signal co-simulation: a hardware SAR controller
+binary-searches PWM duty cycles through an RC filter and sky130 latch
+comparator to find the voltage matching a reference.  Covers both data
+paths, runtime analog control, VCD export, and waveform viewing.
 
 ## Examples
 

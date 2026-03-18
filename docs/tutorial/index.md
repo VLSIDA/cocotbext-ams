@@ -1,23 +1,24 @@
-# Tutorial: PWM DAC with Latch Comparator
+# Tutorial: PWM DAC with SAR Controller
 
 This tutorial walks through a complete mixed-signal co-simulation using
-cocotbext-ams.  A digital PWM signal is RC-filtered into an analog voltage
-and compared against an adjustable reference by a sky130 latch comparator.
+cocotbext-ams.  A hardware SAR (successive-approximation) controller
+binary-searches PWM duty cycles to find the voltage matching an analog
+reference — the binary search runs entirely in Verilog RTL.
 
 ![PWM DAC Tutorial Waveforms](images/pwm_dac_waveforms.png)
 
-*Example output: digital PWM and clock (top), analog filtered voltage
-and reference (middle), and comparator digital output (bottom). The
-analog traces come from `$var real` VCD signals recorded at full ngspice
-resolution. When `vref` is raised from 0.9V to 1.5V at 12μs, the
-comparator output `q` flips from 1→0.*
+*Example output: the SAR controller steps through duty cycles (visible as
+changing PWM density), the RC filter settles at each step, and the
+comparator output guides the next bit decision. After 8 steps, the duty
+cycle converges to match vref.*
 
 ## What you'll learn
 
 - Wiring a digital PWM to an analog RC filter in SPICE
 - Using a sky130 standard-cell latch comparator for analog-to-digital conversion
+- Building a SAR controller in Verilog that binary-searches duty cycles
 - Configuring `DigitalPin`, `AnalogBlock`, and `MixedSignalBridge`
-- Changing analog inputs (`vref`) at runtime
+- Changing analog inputs (`vref`) at runtime for a second conversion
 - Exporting mixed real/digital VCD waveforms for viewing
 
 ## Prerequisites
@@ -35,43 +36,64 @@ export PDK_ROOT=/path/to/your/pdk    # e.g. /usr/share/pdk
 ls $PDK_ROOT/sky130A/libs.ref/sky130_fd_sc_hd/spice/sky130_fd_sc_hd.spice
 ```
 
-## The circuit
+## Architecture
+
+The `adc` module wraps all three components — the binary search runs
+entirely in hardware:
 
 ```
-  pwm_in (digital)                          q, qb (digital)
-      |                                       |
-      v                                       |
-  +-------+     v_filtered      +---------+   |
-  |  RC   |-----(analog)------->|  Latch  |---+
-  | filter|     10k + 100pF     |  Comp   |
-  +-------+                     |  (sky130)|
-                                |         |
-                   vref ------->| vinm    |
-                  (analog,      +---------+
-                   adjustable)      ^
-                                    |
-                                   clk (digital)
+                          adc module (adc.sv)
+  ┌──────────────────────────────────────────────────────────┐
+  │                                                          │
+  │   SAR Controller          PWM Generator                  │
+  │   (sar_controller.sv)     (pwm_gen.sv)                   │
+  │                                                          │
+  │   sar_clk ──> clk         pwm_clk ──> clk               │
+  │   comp_q <─── q ────┐     duty <────── duty[7:0]        │
+  │   duty ──────────────┼──>  pwm_out ─────────┐            │
+  │   done               │                      │            │
+  │                      │                      v            │
+  │                      │    Analog Block (SPICE)           │
+  │                      │    (pwm_dac_stub.sv → ngspice)    │
+  │                      │    ┌────────────────────────┐     │
+  │                      └────┤ q          pwm_in <────┼─────┘
+  │                           │ qb                     │     │
+  │              comp_clk ───>│ clk                    │     │
+  │              vref ───────>│ vref    RC Filter      │     │
+  │              (analog)     │         10k + 100pF    │     │
+  │                           │         Latch Comp     │     │
+  │                           │         (sky130)       │     │
+  │                           └────────────────────────┘     │
+  └──────────────────────────────────────────────────────────┘
 ```
 
-**Digital → Analog path:** The PWM and comparator clock are Verilog signals.
-`ValueChange` monitors update SPICE voltage sources the instant they change —
-no sync overhead.
+**Digital logic (Verilog):** The SAR controller and PWM generator are
+synthesizable RTL.  The SAR controller tests one bit per clock edge
+(MSB first), using the comparator output to decide whether to keep or
+clear each bit.
 
-**Analog → Digital path:** The comparator outputs `q` and `qb` are built
-from sky130 NOR3/NAND3 gates, so they swing rail-to-rail.  When they cross
-the digital threshold, event-driven sync immediately forces the new value
-onto the Verilog signals.
+**Analog (SPICE):** The RC filter smooths the PWM into a DC voltage,
+and the sky130 latch comparator compares it against `vref`.
+
+**Bridge:** cocotbext-ams connects them — `ValueChange` monitors
+propagate `pwm_out` and `comp_clk` changes to SPICE instantly, and
+threshold-crossing detection forces the comparator output `q` back
+onto Verilog.  The bridge uses a hierarchical block name
+(`"dut.u_analog"`) to reach the SPICE stub inside the `adc` wrapper.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
+| [`adc.sv`](adc.sv) | Top-level ADC: SAR + PWM gen + analog comparator |
+| [`sar_controller.sv`](sar_controller.sv) | SAR binary search logic |
+| [`pwm_gen.sv`](pwm_gen.sv) | PWM generator from duty register |
+| [`pwm_dac_stub.sv`](pwm_dac_stub.sv) | Verilog black-box stub for SPICE block |
 | [`rc_filter.sp`](rc_filter.sp) | RC low-pass filter subcircuit |
 | [`comp.sp`](comp.sp) | Latch comparator subcircuit (sky130 cells) |
-| [`pwm_dac.sp`](pwm_dac.sp) | Top-level subcircuit wiring filter → comparator |
-| [`pwm_dac_stub.sv`](pwm_dac_stub.sv) | Verilog black-box stub |
-| [`tb_pwm_dac.sv`](tb_pwm_dac.sv) | Testbench with `$dumpvars` |
-| [`test_pwm_dac.py`](test_pwm_dac.py) | cocotb test |
+| [`pwm_dac.sp`](pwm_dac.sp) | Top-level SPICE wiring: filter → comparator |
+| [`tb_pwm_dac.sv`](tb_pwm_dac.sv) | Testbench instantiating the ADC |
+| [`test_pwm_dac.py`](test_pwm_dac.py) | cocotb test (drives clocks, checks result) |
 | [`Makefile`](Makefile) | cocotb build/run |
 
 ## Step 1: SPICE subcircuits
@@ -86,7 +108,6 @@ c_filt vout vss 100p
 ```
 
 A simple first-order low-pass with τ = 10kΩ × 100pF = 1μs.
-A 75% duty-cycle PWM at 10 MHz settles to ~1.35V (75% of 1.8V).
 
 ### Latch comparator (`comp.sp`)
 
@@ -112,105 +133,143 @@ Xcomp v_filtered vref clk q qb vdd vss comp
 .ends pwm_dac
 ```
 
-## Step 2: Verilog stub
+## Step 2: Digital RTL
+
+### PWM generator (`pwm_gen.sv`)
 
 ```verilog
-module pwm_dac(
-    input  wire pwm_in,
-    input  wire clk,
-    input  wire vref,     // analog-only, stays X
-    output reg  q,        // reg for Force()
-    output reg  qb
+module pwm_gen #(parameter N_BITS = 8)(
+    input  wire              clk,
+    input  wire              reset_n,
+    input  wire [N_BITS-1:0] duty,
+    output reg               pwm_out
 );
-    initial begin q = 1'bx; qb = 1'bx; end
+    reg [N_BITS-1:0] counter;
+
+    always @(posedge clk or negedge reset_n) begin
+        if (!reset_n) begin
+            counter <= 0;
+            pwm_out <= 0;
+        end else begin
+            counter <= counter + 1;
+            pwm_out <= (counter < duty);
+        end
+    end
 endmodule
 ```
 
-Outputs are `reg` so the bridge can `Force()` values.  `vref` is
-analog-only — it stays `X` in the digital domain and is driven entirely
-by the SPICE `EXTERNAL` voltage source.
+With N_BITS=8 and a 100 MHz clock, one PWM period = 256 × 10ns = 2.56 μs.
+The duty register directly controls the output voltage:
+V_filtered ≈ (duty / 256) × VDD.
 
-## Step 3: cocotb test
+### SAR controller (`sar_controller.sv`)
 
-The key parts of `test_pwm_dac.py`:
-
-### Sky130 PDK include
-
-```python
-def _sky130_include() -> list[str]:
-    pdk_root = os.environ.get("PDK_ROOT")
-    spice_file = os.path.join(
-        pdk_root, "sky130A", "libs.ref",
-        "sky130_fd_sc_hd", "spice", "sky130_fd_sc_hd.spice"
-    )
-    return [f".include {spice_file}"]
+```verilog
+module sar_controller #(parameter N_BITS = 8)(
+    input  wire              clk,       // slow SAR step clock
+    input  wire              reset_n,
+    input  wire              comp_q,    // 1 = filtered > vref
+    output reg [N_BITS-1:0]  duty,      // converging duty cycle register
+    output reg               done
+);
 ```
 
-The `extra_lines` field on `AnalogBlock` injects these `.include`
-directives into the generated SPICE wrapper netlist.
+The SAR controller works MSB-first:
 
-### Analog block configuration
+1. On reset, sets `duty = 10000000` (MSB tentatively set)
+2. Each clock edge: reads `comp_q` to evaluate the current bit
+   - If `comp_q = 1` (filtered > vref): duty is too high → clear the bit
+   - If `comp_q = 0` (filtered ≤ vref): keep the bit set
+3. Sets the next bit tentatively and repeats
+4. After 8 steps, asserts `done` with the final duty value
+
+### ADC wrapper (`adc.sv`)
+
+```verilog
+module adc #(parameter N_BITS = 8)(
+    input  wire              pwm_clk, comp_clk, sar_clk, reset_n,
+    input  wire              vref,       // analog-only
+    output wire [N_BITS-1:0] duty,
+    output wire              done
+);
+    wire pwm_out, q, qb;
+
+    pwm_dac u_analog (                        // SPICE stub
+        .pwm_in(pwm_out), .clk(comp_clk),
+        .vref(vref), .q(q), .qb(qb)
+    );
+    pwm_gen #(.N_BITS(N_BITS)) u_pwm_gen (    // PWM generator
+        .clk(pwm_clk), .reset_n(reset_n),
+        .duty(duty), .pwm_out(pwm_out)
+    );
+    sar_controller #(.N_BITS(N_BITS)) u_sar ( // SAR logic
+        .clk(sar_clk), .reset_n(reset_n),
+        .comp_q(q), .duty(duty), .done(done)
+    );
+endmodule
+```
+
+The `adc` module encapsulates the complete system.  The SPICE stub
+(`u_analog`) is inside the wrapper, so the bridge uses a hierarchical
+block name `"dut.u_analog"` to reach it.
+
+## Step 3: Verilog testbench
+
+```verilog
+module tb_pwm_dac;
+    reg pwm_clk, comp_clk, sar_clk, reset_n;
+    wire [7:0] duty;
+    wire done, vref;
+
+    adc #(.N_BITS(8)) dut (
+        .pwm_clk(pwm_clk), .comp_clk(comp_clk),
+        .sar_clk(sar_clk), .reset_n(reset_n),
+        .vref(vref), .duty(duty), .done(done)
+    );
+endmodule
+```
+
+The testbench just instantiates the `adc` and exposes the clock/reset
+signals for cocotb to drive.
+
+## Step 4: cocotb test
+
+The Python test is minimal — the binary search runs in hardware:
 
 ```python
+# The analog block is inside the adc wrapper — use hierarchical name
 pwm_dac = AnalogBlock(
-    name="dut",
+    name="dut.u_analog",   # path to SPICE stub inside adc module
     spice_file="pwm_dac.sp",
     subcircuit="pwm_dac",
-    digital_pins={
-        "pwm_in": DigitalPin("input",  vdd=1.8, vss=0.0),
-        "clk":    DigitalPin("input",  vdd=1.8, vss=0.0),
-        "q":      DigitalPin("output", vdd=1.8, vss=0.0),
-        "qb":     DigitalPin("output", vdd=1.8, vss=0.0),
-    },
+    digital_pins={...},
     analog_inputs={"vref": 0.9},
-    vdd=1.8,
-    extra_lines=sky130_lines + [
-        ".include rc_filter.sp",
-        ".include comp.sp",
-    ],
+    ...
 )
-```
 
-| Pin | Type | Direction |
-|-----|------|-----------|
-| `pwm_in` | `DigitalPin("input")` | Verilog → SPICE |
-| `clk` | `DigitalPin("input")` | Verilog → SPICE |
-| `q`, `qb` | `DigitalPin("output")` | SPICE → Verilog |
-| `vref` | `analog_inputs` | External, adjustable at runtime |
-
-### Bridge and simulation
-
-```python
 bridge = MixedSignalBridge(dut, [pwm_dac], max_sync_interval_ns=50)
+await bridge.start(duration_ns=sim_duration, analog_vcd="pwm_dac_analog.vcd",
+                   vcd_nodes=["v_filtered"])
 
-await bridge.start(
-    duration_ns=20_000,
-    analog_vcd="pwm_dac_analog.vcd",
-    vcd_nodes=["v_filtered"],    # also record the RC filter output
-)
+# Start clocks
+cocotb.start_soon(Clock(dut.pwm_clk, 10, "ns").start())    # 100 MHz
+cocotb.start_soon(Clock(dut.comp_clk, 200, "ns").start())   # 5 MHz
+cocotb.start_soon(sar_clock(dut, step_us=7))                 # ~7μs/step
+
+# Release reset and let the SAR run
+dut.reset_n.value = 1
+# ... wait for done ...
+await RisingEdge(dut.done)
+
+result = int(dut.u_sar.duty.value)  # e.g., 128 for vref=0.9V
 ```
 
-The `vcd_nodes=["v_filtered"]` adds the internal RC filter output to the
-analog VCD — even though it's not a pin, you can probe any SPICE node.
+The test monitors each SAR step, logging the duty cycle and filtered
+voltage as the controller converges.  After the first conversion, it
+changes `vref` to 1.35V, resets the SAR, and verifies convergence to
+a new duty cycle (~75%).
 
-### Test sequence
-
-```python
-# 75% duty cycle PWM -> filtered voltage ~1.35V > 0.9V ref
-cocotb.start_soon(pwm_driver(dut, period_ns=100, duty=0.75, ...))
-cocotb.start_soon(comp_clock(dut, period_ns=200, ...))
-
-await Timer(5, "us")           # wait for RC to settle
-await RisingEdge(dut.clk)      # comparator latches
-assert int(dut.q.value) == 1   # filtered > vref -> q=1
-
-# Raise reference above filtered voltage
-bridge.set_analog_input("dut", "vref", 1.5)
-# ... wait ...
-assert int(dut.q.value) == 0   # filtered < vref -> q=0
-```
-
-## Step 4: Run
+## Step 5: Run
 
 ```bash
 cd docs/tutorial
@@ -218,13 +277,13 @@ export PDK_ROOT=/path/to/your/pdk
 make
 ```
 
-## Step 5: View waveforms
+## Step 6: View waveforms
 
 Two VCD files are produced:
 
 | File | Contents |
 |------|----------|
-| `tb_pwm_dac.vcd` | Digital signals from Icarus Verilog (`wire`/`reg`) |
+| `tb_pwm_dac.vcd` | Digital signals: `duty[7:0]`, `done`, `pwm_out`, clocks |
 | `pwm_dac_analog.vcd` | Analog voltages (`$var real`) + digitized outputs (`$var wire`) |
 
 Load both in your viewer:
@@ -235,40 +294,41 @@ surfer tb_pwm_dac.vcd pwm_dac_analog.vcd
 
 What you'll see:
 
-- **`pwm_in`** (digital): the fast-switching PWM waveform
-- **`v_filtered`** (real): the smooth RC-filtered analog voltage settling to ~1.35V
-- **`vref`** (real): the reference voltage, jumping from 0.9V to 1.5V mid-test
-- **`q`** (digital, from analog VCD): the comparator output flipping 1→0 when vref is raised
-- **`clk`** (digital): the comparator sample clock
-
-The analog VCD shows the exact moment `v_filtered` and `vref` cross,
-and the digital VCD shows `q` responding on the next clock edge.
+- **`duty[7:0]`** (digital): the SAR register converging bit by bit
+- **`pwm_out`** (digital): PWM density changing as duty updates
+- **`v_filtered`** (real): the RC-filtered voltage stepping toward vref
+- **`vref`** (real): the reference voltage (0.9V, then 1.35V)
+- **`q`** (digital): comparator output guiding each SAR decision
+- **`done`** (digital): asserted when conversion completes
 
 ![PWM DAC Waveforms](images/pwm_dac_waveforms.png)
 
 ## How it works under the hood
 
-1. **PWM changes** in Verilog → `ValueChange` monitor instantly writes
-   the new voltage (0V or 1.8V) to the SPICE `EXTERNAL` source.
-   ngspice picks it up on its next internal evaluation step.
+1. **SAR sets a bit** in the duty register → PWM generator immediately
+   changes its output density → `ValueChange` monitor propagates the
+   new `pwm_out` to SPICE instantly.
 
-2. **RC filter integrates** the PWM in SPICE at full analog resolution.
-   Every accepted timestep, `SendData` updates `_node_voltages` and the
-   VCD writer records the smooth `v_filtered` trace.
+2. **RC filter integrates** the new PWM at full analog resolution.
+   The VCD writer records the smooth `v_filtered` trace stepping up
+   or down as each bit is tested.
 
-3. **Comparator latches** on the rising edge of `clk`.  When `q` crosses
-   the digital threshold, `_check_crossings()` sets `_crossing_detected`.
+3. **Comparator latches** on `comp_clk` edges throughout settling.
+   When `q` crosses the digital threshold, event-driven sync forces
+   the value onto Verilog.
 
-4. **GetSyncData** sees the flag, calls `@resume`, and the bridge forces
-   the new `q`/`qb` values onto Verilog and advances digital time by the
-   exact elapsed SPICE time.
+4. **SAR reads `q`** on the next `sar_clk` rising edge (after settling)
+   and decides to keep or clear the bit.  The slow `sar_clk` period
+   (7 μs) ensures the RC filter has settled before each decision.
 
-5. **vref changes** at runtime via `set_analog_input()` — the SPICE
-   `EXTERNAL` source updates immediately.
+5. **After 8 steps**, `done` goes high and `duty` holds the final
+   result.  The test resets the SAR, changes `vref`, and runs a
+   second conversion.
 
 ## Next steps
 
-- Try different PWM duty cycles and observe how `v_filtered` changes
+- Change N_BITS to 10 for higher resolution (needs longer simulation)
 - Add `hysteresis=0.1` to the output `DigitalPin` to prevent glitching
+- Try different RC values and observe settling behavior
 - Look at the [SAR ADC example](../../examples/sar_adc/) for a full data converter
 - See the [API reference](../../README.md#api-reference) for all options

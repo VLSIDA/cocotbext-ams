@@ -1,5 +1,5 @@
 TOPLEVEL_LANG = verilog
-VERILOG_SOURCES = $(PWD)/pwm_dac_stub.sv $(PWD)/tb_pwm_dac.sv
+VERILOG_SOURCES = $(PWD)/pwm_gen.sv $(PWD)/sar_controller.sv $(PWD)/pwm_dac_stub.sv $(PWD)/adc.sv $(PWD)/tb_pwm_dac.sv
 TOPLEVEL = tb_pwm_dac
 MODULE = test_pwm_dac
 
