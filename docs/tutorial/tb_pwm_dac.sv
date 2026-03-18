@@ -16,7 +16,7 @@ module tb_pwm_dac;
     // Outputs
     wire [7:0] duty;
     wire       done;
-    wire       vref;
+    wire       vin;
 
     // ADC: PWM generator + SAR controller + analog comparator
     adc #(.N_BITS(8)) dut (
@@ -24,7 +24,7 @@ module tb_pwm_dac;
         .comp_clk(comp_clk),
         .sar_clk(sar_clk),
         .reset_n(reset_n),
-        .vref(vref),
+        .vin(vin),
         .duty(duty),
         .done(done)
     );

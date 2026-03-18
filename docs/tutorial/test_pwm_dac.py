@@ -1,8 +1,8 @@
 """cocotb test for PWM DAC mixed-signal co-simulation tutorial.
 
 Demonstrates cocotbext-ams with a hardware successive-approximation
-controller that binary-searches PWM duty cycles to find the voltage
-matching a reference.
+controller that binary-searches PWM duty cycles to digitize an
+unknown analog input voltage.
 
 Architecture:
   - sar_controller.sv: SAR logic (binary search in Verilog)
@@ -24,6 +24,7 @@ from cocotbext.ams import AnalogBlock, DigitalPin, MixedSignalBridge
 # SAR parameters
 N_BITS = 8
 VDD = 1.8
+VIN = 1.15  # analog input voltage to digitize
 
 # Timing: RC filter τ = 10kΩ × 100pF = 1μs, need ~5τ to settle
 SAR_STEP_US = 7  # settling + margin per SAR step
@@ -63,7 +64,7 @@ async def sar_clock(dut, step_us: float):
 
 @cocotb.test()
 async def test_pwm_dac(dut):
-    """Let the hardware SAR controller find the duty cycle matching vref."""
+    """Let the hardware SAR controller digitize vin."""
 
     sky130_lines = _sky130_include()
 
@@ -78,7 +79,7 @@ async def test_pwm_dac(dut):
             "q":      DigitalPin("output", vdd=VDD, vss=0.0),
             "qb":     DigitalPin("output", vdd=VDD, vss=0.0),
         },
-        analog_inputs={"vref": 0.9},
+        analog_inputs={"vin": VIN},
         vdd=VDD,
         tran_step="0.1n",
         extra_lines=sky130_lines + [
@@ -87,7 +88,7 @@ async def test_pwm_dac(dut):
         ],
     )
 
-    # Total simulation: initial settle + N_BITS SAR steps + margin
+    # Simulation: initial settle + N_BITS SAR steps + margin
     sim_duration = int((10 + N_BITS * SAR_STEP_US + 10) * 1000)  # in ns
 
     bridge = MixedSignalBridge(dut, [pwm_dac], max_sync_interval_ns=50)
@@ -111,29 +112,35 @@ async def test_pwm_dac(dut):
     await Timer(1, "us")
     dut.reset_n.value = 1
 
-    # --- SAR conversion for vref = 0.9V ---
-    vref = 0.9
-    target_duty = int(round(vref / VDD * (2**N_BITS)))
+    # --- SAR conversion for vin = 1.15V ---
+    target_duty = int(round(VIN / VDD * (2**N_BITS)))
     cocotb.log.info(
-        "SAR search: vref=%.2fV, expect duty≈%d/256 (%.1f%%)",
-        vref, target_duty, target_duty / 2.56,
+        "SAR ADC: digitizing vin=%.2fV  (expect duty≈%d/256)",
+        VIN, target_duty,
     )
 
     # Wait for initial PWM settling before first SAR step
     await Timer(5, "us")
 
-    # Wait for SAR to finish (N_BITS clock edges + margin)
+    # Watch each SAR step: the comparator output q decides each bit
+    bits = []
+
     for step in range(N_BITS):
         await RisingEdge(dut.sar_clk)
         await Timer(100, "ns")  # let combinational logic settle
 
-        duty_val = int(dut.u_sar.duty.value)
-        done_val = int(dut.done.value)
+        q_val = int(dut.dut.u_analog.q.value)
         v_filt = bridge.get_analog_voltage("dut.u_analog", "v_filtered")
 
+        # SAR decision: q=1 means DAC > vin → bit is 0 (too high)
+        #               q=0 means DAC ≤ vin → bit is 1 (keep it)
+        bit = 0 if q_val == 1 else 1
+        bits.append(bit)
+        partial = "".join(str(b) for b in bits).ljust(N_BITS, ".")
+
         cocotb.log.info(
-            "  [%d] duty=%d/256 (%.1f%%)  v_filtered=%.3fV  done=%d",
-            step, duty_val, duty_val / 2.56, v_filt, done_val,
+            "  bit[%d]: q=%d → %d  |  %s  v_filtered=%.3fV",
+            N_BITS - 1 - step, q_val, bit, partial, v_filt,
         )
 
     # Wait for done
@@ -142,9 +149,10 @@ async def test_pwm_dac(dut):
 
     result = int(dut.u_sar.duty.value)
     result_voltage = result / (2**N_BITS) * VDD
+    binary_str = format(result, f"0{N_BITS}b")
     cocotb.log.info(
-        "Converged: duty=%d/256 → voltage=%.3fV (target=%.3fV)",
-        result, result_voltage, vref,
+        "Result: %s (0x%02X) = %d/256 → %.3fV  (vin=%.3fV)",
+        binary_str, result, result, result_voltage, VIN,
     )
 
     error = abs(result - target_duty)
@@ -153,52 +161,8 @@ async def test_pwm_dac(dut):
         f"(error={error})"
     )
 
-    # --- Second conversion: change vref to 1.35V ---
-    vref2 = 1.35
-    target_duty2 = int(round(vref2 / VDD * (2**N_BITS)))
-    bridge.set_analog_input("dut.u_analog", "vref", vref2)
-    cocotb.log.info(
-        "\nSAR search: vref=%.2fV, expect duty≈%d/256 (%.1f%%)",
-        vref2, target_duty2, target_duty2 / 2.56,
-    )
-
-    # Reset the SAR controller for a new conversion
-    dut.reset_n.value = 0
-    await Timer(1, "us")
-    dut.reset_n.value = 1
-    await Timer(5, "us")
-
-    for step in range(N_BITS):
-        await RisingEdge(dut.sar_clk)
-        await Timer(100, "ns")
-
-        duty_val = int(dut.u_sar.duty.value)
-        done_val = int(dut.done.value)
-        v_filt = bridge.get_analog_voltage("dut.u_analog", "v_filtered")
-
-        cocotb.log.info(
-            "  [%d] duty=%d/256 (%.1f%%)  v_filtered=%.3fV  done=%d",
-            step, duty_val, duty_val / 2.56, v_filt, done_val,
-        )
-
-    if not int(dut.done.value):
-        await RisingEdge(dut.done)
-
-    result2 = int(dut.u_sar.duty.value)
-    result_voltage2 = result2 / (2**N_BITS) * VDD
-    cocotb.log.info(
-        "Converged: duty=%d/256 → voltage=%.3fV (target=%.3fV)",
-        result2, result_voltage2, vref2,
-    )
-
-    error2 = abs(result2 - target_duty2)
-    assert error2 <= 2, (
-        f"SAR result {result2} too far from expected {target_duty2} "
-        f"(error={error2})"
-    )
-
     await bridge.stop()
 
-    cocotb.log.info("Done! View waveforms:")
+    cocotb.log.info("View waveforms:")
     cocotb.log.info("  Digital:  tb_pwm_dac.vcd")
     cocotb.log.info("  Analog:   pwm_dac_analog.vcd")

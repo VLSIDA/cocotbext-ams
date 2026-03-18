@@ -11,7 +11,7 @@ module adc #(
     input  wire              comp_clk,   // comparator latch clock
     input  wire              sar_clk,    // slow clock for SAR steps
     input  wire              reset_n,
-    input  wire              vref,       // analog-only (stays X in digital)
+    input  wire              vin,        // analog input to measure (stays X in digital)
     output wire [N_BITS-1:0] duty,       // current/final duty cycle value
     output wire              done        // SAR conversion complete
 );
@@ -22,7 +22,7 @@ module adc #(
     pwm_dac u_analog (
         .pwm_in(pwm_out),
         .clk(comp_clk),
-        .vref(vref),
+        .vin(vin),
         .q(q),
         .qb(qb)
     );

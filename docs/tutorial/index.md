@@ -2,15 +2,15 @@
 
 This tutorial walks through a complete mixed-signal co-simulation using
 cocotbext-ams.  A hardware SAR (successive-approximation) controller
-binary-searches PWM duty cycles to find the voltage matching an analog
-reference — the binary search runs entirely in Verilog RTL.
+binary-searches PWM duty cycles to digitize an unknown analog input
+voltage — the binary search runs entirely in Verilog RTL.
 
 ![PWM DAC Tutorial Waveforms](images/pwm_dac_waveforms.png)
 
 *Example output: the SAR controller steps through duty cycles (visible as
-changing PWM density), the RC filter settles at each step, and the
-comparator output guides the next bit decision. After 8 steps, the duty
-cycle converges to match vref.*
+changing PWM density), the RC-filtered DAC output steps toward vin, and
+the comparator output `q` guides each bit decision.  For vin = 1.15V, the
+DAC output steps: 0.9V → 1.35V → 1.125V → ... converging in 8 steps.*
 
 ## What you'll learn
 
@@ -18,7 +18,6 @@ cycle converges to match vref.*
 - Using a sky130 standard-cell latch comparator for analog-to-digital conversion
 - Building a SAR controller in Verilog that binary-searches duty cycles
 - Configuring `DigitalPin`, `AnalogBlock`, and `MixedSignalBridge`
-- Changing analog inputs (`vref`) at runtime for a second conversion
 - Exporting mixed real/digital VCD waveforms for viewing
 
 ## Prerequisites
@@ -59,7 +58,7 @@ entirely in hardware:
   │                      └────┤ q          pwm_in <────┼─────┘
   │                           │ qb                     │     │
   │              comp_clk ───>│ clk                    │     │
-  │              vref ───────>│ vref    RC Filter      │     │
+  │              vin ────────>│ vin     RC Filter      │     │
   │              (analog)     │         10k + 100pF    │     │
   │                           │         Latch Comp     │     │
   │                           │         (sky130)       │     │
@@ -67,13 +66,30 @@ entirely in hardware:
   └──────────────────────────────────────────────────────────┘
 ```
 
-**Digital logic (Verilog):** The SAR controller and PWM generator are
-synthesizable RTL.  The SAR controller tests one bit per clock edge
-(MSB first), using the comparator output to decide whether to keep or
-clear each bit.
+**How the SAR works:**
+The comparator compares the DAC output (RC-filtered PWM) against `vin`.
+On each SAR clock edge, the controller reads `q` and decides the next bit:
 
-**Analog (SPICE):** The RC filter smooths the PWM into a DC voltage,
-and the sky130 latch comparator compares it against `vref`.
+- `q = 1` → DAC output > vin → duty too high → clear bit
+- `q = 0` → DAC output ≤ vin → keep bit, try next
+
+For `vin = 1.15V` with VDD = 1.8V, the DAC output steps through:
+
+| Step | Bit | Duty | DAC output | q | Decision |
+|------|-----|------|------------|---|----------|
+| 0 | 7 | 128/256 | 0.90V | 0 | keep (DAC < vin) |
+| 1 | 6 | 192/256 | 1.35V | 1 | clear (DAC > vin) |
+| 2 | 5 | 160/256 | 1.13V | 0 | keep (DAC < vin) |
+| 3 | 4 | 168/256 | 1.18V | 1 | clear (DAC > vin) |
+| ... | ... | ... | ... | ... | ... |
+
+**Digital logic (Verilog):** The SAR controller and PWM generator are
+synthesizable RTL.  The comparator output `q` is the only feedback from
+the analog domain — it drives the entire binary search.
+
+**Analog (SPICE):** The RC filter smooths the PWM into a DC voltage
+(the DAC output), and the sky130 latch comparator compares it against
+the analog input `vin`.
 
 **Bridge:** cocotbext-ams connects them — `ValueChange` monitors
 propagate `pwm_out` and `comp_clk` changes to SPICE instantly, and
@@ -127,11 +143,14 @@ so digitizing them with a threshold makes perfect sense.
 ### Top-level (`pwm_dac.sp`)
 
 ```spice
-.subckt pwm_dac pwm_in clk vref q qb vdd vss
+.subckt pwm_dac pwm_in clk vin q qb vdd vss
 Xrc   pwm_in v_filtered vdd vss rc_filter
-Xcomp v_filtered vref clk q qb vdd vss comp
+Xcomp v_filtered vin clk q qb vdd vss comp
 .ends pwm_dac
 ```
+
+The comparator's `vinp` receives the DAC output (RC-filtered PWM),
+and `vinm` receives the analog input `vin` being digitized.
 
 ## Step 2: Digital RTL
 
@@ -159,7 +178,7 @@ endmodule
 ```
 
 With N_BITS=8 and a 100 MHz clock, one PWM period = 256 × 10ns = 2.56 μs.
-The duty register directly controls the output voltage:
+The duty register directly controls the DAC output voltage:
 V_filtered ≈ (duty / 256) × VDD.
 
 ### SAR controller (`sar_controller.sv`)
@@ -168,7 +187,7 @@ V_filtered ≈ (duty / 256) × VDD.
 module sar_controller #(parameter N_BITS = 8)(
     input  wire              clk,       // slow SAR step clock
     input  wire              reset_n,
-    input  wire              comp_q,    // 1 = filtered > vref
+    input  wire              comp_q,    // 1 = DAC output > vin
     output reg [N_BITS-1:0]  duty,      // converging duty cycle register
     output reg               done
 );
@@ -178,8 +197,8 @@ The SAR controller works MSB-first:
 
 1. On reset, sets `duty = 10000000` (MSB tentatively set)
 2. Each clock edge: reads `comp_q` to evaluate the current bit
-   - If `comp_q = 1` (filtered > vref): duty is too high → clear the bit
-   - If `comp_q = 0` (filtered ≤ vref): keep the bit set
+   - If `comp_q = 1` (DAC > vin): duty is too high → clear the bit
+   - If `comp_q = 0` (DAC ≤ vin): keep the bit set
 3. Sets the next bit tentatively and repeats
 4. After 8 steps, asserts `done` with the final duty value
 
@@ -188,7 +207,7 @@ The SAR controller works MSB-first:
 ```verilog
 module adc #(parameter N_BITS = 8)(
     input  wire              pwm_clk, comp_clk, sar_clk, reset_n,
-    input  wire              vref,       // analog-only
+    input  wire              vin,        // analog input to measure
     output wire [N_BITS-1:0] duty,
     output wire              done
 );
@@ -196,7 +215,7 @@ module adc #(parameter N_BITS = 8)(
 
     pwm_dac u_analog (                        // SPICE stub
         .pwm_in(pwm_out), .clk(comp_clk),
-        .vref(vref), .q(q), .qb(qb)
+        .vin(vin), .q(q), .qb(qb)
     );
     pwm_gen #(.N_BITS(N_BITS)) u_pwm_gen (    // PWM generator
         .clk(pwm_clk), .reset_n(reset_n),
@@ -219,12 +238,12 @@ block name `"dut.u_analog"` to reach it.
 module tb_pwm_dac;
     reg pwm_clk, comp_clk, sar_clk, reset_n;
     wire [7:0] duty;
-    wire done, vref;
+    wire done, vin;
 
     adc #(.N_BITS(8)) dut (
         .pwm_clk(pwm_clk), .comp_clk(comp_clk),
         .sar_clk(sar_clk), .reset_n(reset_n),
-        .vref(vref), .duty(duty), .done(done)
+        .vin(vin), .duty(duty), .done(done)
     );
 endmodule
 ```
@@ -243,7 +262,7 @@ pwm_dac = AnalogBlock(
     spice_file="pwm_dac.sp",
     subcircuit="pwm_dac",
     digital_pins={...},
-    analog_inputs={"vref": 0.9},
+    analog_inputs={"vin": 1.15},    # analog input to digitize
     ...
 )
 
@@ -261,13 +280,21 @@ dut.reset_n.value = 1
 # ... wait for done ...
 await RisingEdge(dut.done)
 
-result = int(dut.u_sar.duty.value)  # e.g., 128 for vref=0.9V
+result = int(dut.u_sar.duty.value)
 ```
 
-The test monitors each SAR step, logging the duty cycle and filtered
-voltage as the controller converges.  After the first conversion, it
-changes `vref` to 1.35V, resets the SAR, and verifies convergence to
-a new duty cycle (~75%).
+The test watches the comparator output `q` at each SAR step, showing
+the binary result being built up bit by bit:
+
+```
+SAR ADC: digitizing vin=1.15V  (expect duty≈163/256)
+  bit[7]: q=0 → 1  |  1.......  v_filtered=0.900V
+  bit[6]: q=1 → 0  |  10......  v_filtered=1.350V
+  bit[5]: q=0 → 1  |  101.....  v_filtered=1.125V
+  bit[4]: q=1 → 0  |  1010....  v_filtered=1.181V
+  ...
+Result: 10100011 (0xA3) = 163/256 → 1.147V  (vin=1.150V)
+```
 
 ## Step 5: Run
 
@@ -296,8 +323,8 @@ What you'll see:
 
 - **`duty[7:0]`** (digital): the SAR register converging bit by bit
 - **`pwm_out`** (digital): PWM density changing as duty updates
-- **`v_filtered`** (real): the RC-filtered voltage stepping toward vref
-- **`vref`** (real): the reference voltage (0.9V, then 1.35V)
+- **`v_filtered`** (real): the DAC output stepping toward vin
+- **`vin`** (real): the analog input being digitized (constant 1.15V)
 - **`q`** (digital): comparator output guiding each SAR decision
 - **`done`** (digital): asserted when conversion completes
 
@@ -322,8 +349,7 @@ What you'll see:
    (7 μs) ensures the RC filter has settled before each decision.
 
 5. **After 8 steps**, `done` goes high and `duty` holds the final
-   result.  The test resets the SAR, changes `vref`, and runs a
-   second conversion.
+   N-bit digital result representing `vin`.
 
 ## Next steps
 
