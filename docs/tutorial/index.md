@@ -4,6 +4,14 @@ This tutorial walks through a complete mixed-signal co-simulation using
 cocotbext-ams.  A digital PWM signal is RC-filtered into an analog voltage
 and compared against an adjustable reference by a sky130 latch comparator.
 
+![PWM DAC Tutorial Waveforms](images/pwm_dac_waveforms.png)
+
+*Example output: digital PWM and clock (top), analog filtered voltage
+and reference (middle), and comparator digital output (bottom). The
+analog traces come from `$var real` VCD signals recorded at full ngspice
+resolution. When `vref` is raised from 0.9V to 1.5V at 12μs, the
+comparator output `q` flips from 1→0.*
+
 ## What you'll learn
 
 - Wiring a digital PWM to an analog RC filter in SPICE
@@ -235,6 +243,8 @@ What you'll see:
 
 The analog VCD shows the exact moment `v_filtered` and `vref` cross,
 and the digital VCD shows `q` responding on the next clock edge.
+
+![PWM DAC Waveforms](images/pwm_dac_waveforms.png)
 
 ## How it works under the hood
 

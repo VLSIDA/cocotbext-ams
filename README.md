@@ -2,6 +2,17 @@
 
 An ngspice bridge for [cocotb](https://github.com/cocotb/cocotb), enabling open-source mixed-signal co-simulation.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Tutorial: PWM DAC with Latch Comparator](docs/tutorial/index.md)
+- [API Reference](#api-reference)
+- [Examples](#examples)
+- [Architecture Details](#architecture-details)
+
 ## Overview
 
 cocotbext-ams synchronizes cocotb's digital simulation with ngspice's analog
@@ -41,6 +52,18 @@ at a fixed interval, it reacts to actual signal changes:
 - **Digital → Analog:** Verilog 1/0 mapped to VDD/VSS via EXTERNAL voltage sources in SPICE
 - **Analog → Digital:** SPICE node voltage compared against a threshold (with optional hysteresis), result forced onto Verilog output
 - **Analog-only pins:** remain X in Verilog, fully simulated in SPICE
+
+**Waveform output:**
+
+Pass `analog_vcd="file.vcd"` to record SPICE node voltages as `real`-typed VCD
+signals alongside digitized outputs as `wire` signals.  Load this VCD with the
+HDL simulator's digital VCD to see everything together:
+
+![PWM DAC Waveforms](docs/tutorial/images/pwm_dac_waveforms.png)
+
+*Digital PWM and clock (top), analog filtered voltage and reference (middle),
+and comparator output (bottom).  See the [full tutorial](docs/tutorial/index.md)
+for details.*
 
 ## Prerequisites
 
@@ -161,6 +184,7 @@ Describes an analog block (SPICE subcircuit) to be co-simulated.
 | `vdd`           | Supply voltage (default 1.8) |
 | `vss`           | Ground voltage (default 0.0) |
 | `tran_step`     | SPICE transient step size (default `"0.1n"`) |
+| `extra_lines`   | Additional SPICE lines for the generated netlist (e.g., `.include` directives for PDK libraries) |
 
 ### `MixedSignalBridge(dut, analog_blocks, max_sync_interval_ns=100.0, ngspice_lib=None)`
 
@@ -184,6 +208,13 @@ ceiling that bounds time drift and ensures digital-side events are processed:
 - **10-50 ns:** Tight ceiling, suitable when digital-side timing is critical
 - **100 ns (default):** Good balance for most designs
 - **1000+ ns:** Loose ceiling, relies mostly on event-driven sync
+
+## Tutorial
+
+**[PWM DAC with Latch Comparator](docs/tutorial/index.md)** — A complete
+walkthrough of a mixed-signal co-simulation: digital PWM → RC filter → sky130
+latch comparator.  Covers both data paths, runtime analog control, VCD export,
+and waveform viewing.
 
 ## Examples
 
