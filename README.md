@@ -1,6 +1,21 @@
-# cocotbext-ams
+<p align="center">
+  <img src="docs/logo.svg" alt="cocotbext-ams" width="480">
+</p>
 
-An ngspice bridge for [cocotb](https://github.com/cocotb/cocotb), enabling open-source mixed-signal co-simulation.
+<h1 align="center">cocotbext-ams</h1>
+
+<p align="center">
+  <strong>An ngspice bridge for <a href="https://github.com/cocotb/cocotb">cocotb</a> — open-source mixed-signal co-simulation</strong>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/cocotbext-ams/"><img src="https://img.shields.io/pypi/v/cocotbext-ams?color=blue" alt="PyPI"></a>
+  <a href="https://github.com/VLSIDA/cocotbext-ams/actions/workflows/test.yml"><img src="https://github.com/VLSIDA/cocotbext-ams/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+  <a href="https://pypi.org/project/cocotbext-ams/"><img src="https://img.shields.io/pypi/pyversions/cocotbext-ams" alt="Python"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-green" alt="License"></a>
+</p>
+
+---
 
 ## Table of Contents
 

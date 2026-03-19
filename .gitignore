@@ -5,3 +5,4 @@ dist/
 build/
 .pytest_cache/
 *.svg
+!docs/logo.svg

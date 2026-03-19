@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 160" width="480" height="160">
+  <defs>
+    <linearGradient id="wave-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="45%" stop-color="#3b82f6"/>
+      <stop offset="55%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Digital square wave (left) transitioning to analog sine (right) -->
+  <path d="
+    M 40,110
+    L 40,50  L 80,50  L 80,110  L 120,110
+    L 120,50  L 160,50  L 160,110  L 200,110
+    L 200,50  L 220,50
+    Q 230,50 240,80
+    C 260,140 280,140 300,80
+    C 320,20 340,20 360,80
+    C 380,140 400,140 420,80
+    C 430,45 440,50 440,80
+  "
+  fill="none" stroke="url(#wave-grad)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Subtle center divider -->
+  <line x1="230" y1="30" x2="230" y2="130" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4,4" opacity="0.5"/>
+
+  <!-- Labels -->
+  <text x="120" y="148" text-anchor="middle" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#3b82f6" letter-spacing="0.5">DIGITAL</text>
+  <text x="340" y="148" text-anchor="middle" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#f59e0b" letter-spacing="0.5">ANALOG</text>
+</svg>
