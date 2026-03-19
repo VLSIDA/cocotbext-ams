@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cocotbext-ams"
-version = "0.0.3"
+version = "0.0.4"
 description = "ngspice bridge for cocotb — open-source mixed-signal co-simulation"
 requires-python = ">=3.10"
 license = "BSD-3-Clause"
