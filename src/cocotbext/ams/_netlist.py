@@ -39,6 +39,7 @@ def generate_netlist(
     tran_step: str = "0.1n",
     tran_stop: str = "100u",
     extra_lines: list[str] | None = None,
+    simulator: str = "ngspice",
 ) -> list[str]:
     """Generate a complete SPICE deck wrapping the user's subcircuit.
 
@@ -52,10 +53,27 @@ def generate_netlist(
         tran_step: Transient analysis step size.
         tran_stop: Transient analysis stop time.
         extra_lines: Additional SPICE lines to include.
+        simulator: Simulator backend — ``"ngspice"`` or ``"xyce"``.
 
     Returns:
         List of netlist lines.
     """
+    if simulator == "ngspice":
+        return _generate_netlist_ngspice(
+            spice_file, subcircuit, digital_pins, analog_inputs,
+            vdd, vss, tran_step, tran_stop, extra_lines,
+        )
+    elif simulator == "xyce":
+        return _generate_netlist_xyce(
+            spice_file, subcircuit, digital_pins, analog_inputs,
+            vdd, vss, tran_step, tran_stop, extra_lines,
+        )
+    else:
+        raise ValueError(f"Unknown simulator: {simulator!r} (expected 'ngspice' or 'xyce')")
+
+
+def _validate_spice_file(spice_file: str | Path, subcircuit: str) -> Path:
+    """Validate that the SPICE file exists and contains the subcircuit."""
     spice_path = Path(spice_file).resolve()
     if not spice_path.is_file():
         raise FileNotFoundError(
@@ -78,6 +96,22 @@ def generate_netlist(
                 f"Subcircuit '{subcircuit}' not found in {spice_path}. "
                 f"Check that the subcircuit name matches a .subckt definition."
             )
+    return spice_path
+
+
+def _generate_netlist_ngspice(
+    spice_file: str | Path,
+    subcircuit: str,
+    digital_pins: dict[str, DigitalPin],
+    analog_inputs: dict[str, float],
+    vdd: float,
+    vss: float,
+    tran_step: str,
+    tran_stop: str,
+    extra_lines: list[str] | None,
+) -> list[str]:
+    """Generate an ngspice-format netlist with EXTERNAL voltage sources."""
+    spice_path = _validate_spice_file(spice_file, subcircuit)
 
     lines: list[str] = []
     lines.append(f"* cocotbext-ams auto-generated wrapper for {subcircuit}")
@@ -150,6 +184,94 @@ def generate_netlist(
             lines.append(line)
 
     lines.append(".end")
+    return lines
+
+
+def _generate_netlist_xyce(
+    spice_file: str | Path,
+    subcircuit: str,
+    digital_pins: dict[str, DigitalPin],
+    analog_inputs: dict[str, float],
+    vdd: float,
+    vss: float,
+    tran_step: str,
+    tran_stop: str,
+    extra_lines: list[str] | None,
+) -> list[str]:
+    """Generate a Xyce-format netlist with YDAC devices for runtime sources."""
+    spice_path = _validate_spice_file(spice_file, subcircuit)
+
+    lines: list[str] = []
+    lines.append(f"* cocotbext-ams auto-generated wrapper for {subcircuit}")
+    lines.append(f".INCLUDE {spice_path}")
+    lines.append("")
+
+    port_connections: list[str] = []
+    print_nodes: list[str] = []
+
+    # YDAC devices for digital input pins (Xyce runtime-controllable sources)
+    input_pins = {
+        name: pin for name, pin in digital_pins.items()
+        if pin.direction == "input"
+    }
+    if input_pins:
+        lines.append("* DAC devices for digital inputs")
+        for pin_name, pin in input_pins.items():
+            for bit in range(pin.width):
+                node = _bit_node_name(pin_name, bit, pin.width)
+                vsrc = _vsrc_name(pin_name, bit, pin.width)
+                lines.append(f"YDAC {vsrc} DAC {node} 0")
+                port_connections.append(node)
+
+    # Output pins -- nodes to be probed
+    output_pins = {
+        name: pin for name, pin in digital_pins.items()
+        if pin.direction == "output"
+    }
+    if output_pins:
+        lines.append("")
+        lines.append("* Output nodes (probed by bridge)")
+        for pin_name, pin in output_pins.items():
+            for bit in range(pin.width):
+                node = _bit_node_name(pin_name, bit, pin.width)
+                port_connections.append(node)
+                print_nodes.append(f"v({node})")
+
+    # YDAC devices for analog input sources
+    if analog_inputs:
+        lines.append("")
+        lines.append("* Analog input sources (DAC — controllable at runtime)")
+        for name, voltage in analog_inputs.items():
+            lines.append(f"YDAC v_{name} DAC {name} 0")
+            port_connections.append(name)
+
+    # Power supplies (standard DC sources — not runtime-controlled)
+    lines.append("")
+    lines.append("* Power supplies")
+    lines.append(f"v_vdd vdd 0 dc {vdd}")
+    lines.append(f"v_vss vss 0 dc {vss}")
+
+    # Subcircuit instantiation
+    lines.append("")
+    lines.append("* Subcircuit instantiation")
+    ports_str = " ".join(port_connections + ["vdd", "vss"])
+    lines.append(f"x1 {ports_str} {subcircuit}")
+
+    # Print directive for output nodes
+    if print_nodes:
+        lines.append("")
+        lines.append(f".PRINT TRAN {' '.join(print_nodes)}")
+
+    # Transient analysis (Xyce uses .TRAN without uic)
+    lines.append("")
+    lines.append(f".TRAN {tran_step} {tran_stop}")
+
+    if extra_lines:
+        lines.append("")
+        for line in extra_lines:
+            lines.append(line)
+
+    lines.append(".END")
     return lines
 
 

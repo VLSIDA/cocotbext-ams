@@ -4,11 +4,11 @@
 
 """MixedSignalBridge: event-driven co-simulation orchestrator.
 
-Coordinates co-simulation between cocotb (digital) and ngspice (analog).
-Synchronization is event-driven: threshold crossings on analog outputs
-trigger immediate sync, while a configurable maximum interval provides
-a fallback ceiling. Digital-to-analog updates happen asynchronously via
-ValueChange monitors — no sync overhead.
+Coordinates co-simulation between cocotb (digital) and an analog SPICE
+simulator (ngspice or Xyce).  Synchronization is event-driven: threshold
+crossings on analog outputs trigger immediate sync, while a configurable
+maximum interval provides a fallback ceiling. Digital-to-analog updates
+happen asynchronously via ValueChange monitors — no sync overhead.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from cocotbext.ams._netlist import (
 )
 from cocotbext.ams._ngspice import NgspiceInterface
 from cocotbext.ams._pins import DigitalPin
+from cocotbext.ams._simulator import SimulatorInterface
 from cocotbext.ams._vcd import AnalogVcdWriter
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ class AnalogBlock:
         tran_step: Transient analysis internal step size.
         extra_lines: Additional SPICE lines to include in the generated
             netlist (e.g., ``.include`` directives for PDK libraries).
+        simulator: Simulator backend — ``"ngspice"`` (default) or ``"xyce"``.
     """
 
     name: str
@@ -64,36 +66,35 @@ class AnalogBlock:
     vss: float = 0.0
     tran_step: str = "0.1n"
     extra_lines: list[str] = field(default_factory=list)
+    simulator: str = "ngspice"
 
 
 class MixedSignalBridge:
-    """Orchestrates event-driven co-simulation between cocotb and ngspice.
+    """Orchestrates event-driven co-simulation between cocotb and a SPICE simulator.
 
     Synchronization is triggered by two mechanisms:
     1. **Event-driven:** When an analog output crosses a digital threshold,
-       ngspice immediately syncs to update the Verilog signal.
+       the simulator immediately syncs to update the Verilog signal.
     2. **Fallback interval:** A configurable maximum interval ensures sync
        happens even when no crossings occur, bounding time drift.
 
     Digital-to-analog updates (Verilog -> SPICE) happen asynchronously via
     ``ValueChange`` monitor coroutines that update the VSRC dict directly.
-    No sync overhead is needed because ngspice reads VSRCs on every
-    internal evaluation step.
 
     Thread model:
-        - ngspice runs a blocking ``tran`` command inside a ``@bridge`` thread.
-        - At each sync point (event or fallback), the GetSyncData callback
-          blocks the ngspice thread and calls back into cocotb via ``@resume``
-          to force new digital values and advance digital time.
+        - The simulator runs a blocking simulation inside a ``@bridge`` thread.
+        - At each sync point (event or fallback), the simulator thread calls
+          a ``@resume`` function to block and let cocotb advance digital time.
+        - For ngspice: the ``GetSyncData`` callback triggers sync.
+        - For Xyce: the explicit ``simulateUntil`` stepping loop triggers sync.
 
     Thread safety:
         - ``_vsrc_values`` dict is written by cocotb coroutines (ValueChange
-          monitors) and read by the ngspice callback thread (GetVSRCData).
+          monitors) and read by the simulator thread.
           This is safe because Python's GIL ensures dict reads/writes are
-          atomic, and stale reads are acceptable (ngspice reads on every
-          evaluation step, so it picks up changes within one timestep).
-        - ``_node_voltages`` dict is written by the ngspice thread (SendData)
-          and read by cocotb (at sync points only, when ngspice is paused).
+          atomic, and stale reads are acceptable.
+        - ``_node_voltages`` dict is written by the simulator thread
+          and read by cocotb (at sync points only, when the simulator is paused).
         - All other shared state is only accessed at sync points when one
           thread is blocked.
 
@@ -102,8 +103,8 @@ class MixedSignalBridge:
         analog_blocks: List of AnalogBlock descriptions.
         max_sync_interval_ns: Maximum time between sync points in nanoseconds.
             Sync also occurs immediately on any threshold crossing.
-        ngspice_lib: Path to libngspice.so (auto-detected if None).
-        sync_period_ns: Deprecated alias for max_sync_interval_ns.
+        simulator_lib: Path to the simulator shared library (auto-detected if None).
+        ngspice_lib: Deprecated alias for simulator_lib.
     """
 
     def __init__(
@@ -111,22 +112,22 @@ class MixedSignalBridge:
         dut: Any,
         analog_blocks: list[AnalogBlock],
         max_sync_interval_ns: float | None = None,
+        simulator_lib: str | Path | None = None,
         ngspice_lib: str | Path | None = None,
-        sync_period_ns: float | None = None,
     ) -> None:
-        # Handle deprecated sync_period_ns parameter
-        if sync_period_ns is not None:
-            if max_sync_interval_ns is not None:
+        # Handle deprecated ngspice_lib parameter
+        if ngspice_lib is not None:
+            if simulator_lib is not None:
                 raise ValueError(
-                    "Cannot specify both 'max_sync_interval_ns' and "
-                    "'sync_period_ns' (deprecated alias)"
+                    "Cannot specify both 'simulator_lib' and "
+                    "'ngspice_lib' (deprecated alias)"
                 )
             warnings.warn(
-                "'sync_period_ns' is deprecated, use 'max_sync_interval_ns' instead",
+                "'ngspice_lib' is deprecated, use 'simulator_lib' instead",
                 DeprecationWarning,
                 stacklevel=2,
             )
-            max_sync_interval_ns = sync_period_ns
+            simulator_lib = ngspice_lib
 
         if max_sync_interval_ns is None:
             max_sync_interval_ns = 100.0
@@ -135,9 +136,9 @@ class MixedSignalBridge:
         self._analog_blocks = analog_blocks
         self._max_sync_interval_ns = max_sync_interval_ns
         self._max_sync_interval_sec = max_sync_interval_ns * 1e-9
-        self._ngspice_lib = ngspice_lib
+        self._simulator_lib = simulator_lib
 
-        self._ngspice: NgspiceInterface | None = None
+        self._sim: SimulatorInterface | None = None
         self._running = False
 
         # Track SPICE time at last sync for dynamic Timer advance
@@ -170,13 +171,17 @@ class MixedSignalBridge:
         if self._running:
             raise RuntimeError("Bridge is already running")
 
-        ngspice = NgspiceInterface(self._ngspice_lib)
-        self._ngspice = ngspice
+        # Determine simulator type from the first block (all blocks must
+        # use the same simulator in this implementation).
+        simulator = self._analog_blocks[0].simulator if self._analog_blocks else "ngspice"
+
+        sim = self._create_simulator(simulator)
+        self._sim = sim
         self._running = True
         self._last_sync_spice_time = 0.0
 
         # Install the sync-point callback that bridges back into cocotb
-        ngspice._on_sync_point = self._on_sync_point_resume
+        sim._on_sync_point = self._on_sync_point_resume
 
         # Collect VCD registration info: analog (real) nodes and digital (wire) pins
         vcd_analog_names: list[str] = []
@@ -195,20 +200,21 @@ class MixedSignalBridge:
                 tran_step=block.tran_step,
                 tran_stop=tran_stop,
                 extra_lines=block.extra_lines or None,
+                simulator=block.simulator,
             )
-            ngspice.load_circuit(netlist_lines)
+            sim.load_circuit(netlist_lines)
 
             # Cache VSRC and output node name mappings
             self._block_vsrc_names[block.name] = get_vsrc_names(block.digital_pins)
             self._block_output_nodes[block.name] = get_output_node_names(block.digital_pins)
 
-            # Register output pin configs with NgspiceInterface for crossing detection
+            # Register output pin configs for crossing detection
             output_nodes = self._block_output_nodes[block.name]
             for pin_name, pin in block.digital_pins.items():
                 if pin.direction == "output":
                     node_names = output_nodes.get(pin_name, [])
                     if node_names:
-                        ngspice._output_pin_configs[pin_name] = (node_names, pin)
+                        sim._output_pin_configs[pin_name] = (node_names, pin)
                         # Analog nodes (real): the raw SPICE voltages
                         vcd_analog_names.extend(node_names)
                         # Digital signal (wire): the digitized output value
@@ -218,14 +224,14 @@ class MixedSignalBridge:
             for ain_name in block.analog_inputs:
                 vcd_analog_names.append(ain_name)
 
-            # Cache analog input VSRC names (they are also EXTERNAL now)
+            # Cache analog input VSRC names
             self._block_analog_vsrc_names[block.name] = {
                 name: f"v_{name}" for name in block.analog_inputs
             }
 
             # Set initial analog input VSRC values
             for ain_name, voltage in block.analog_inputs.items():
-                ngspice.set_vsrc(f"v_{ain_name}", voltage)
+                sim.set_vsrc(f"v_{ain_name}", voltage)
 
             # Set initial digital input VSRC values from Verilog signal states
             self._update_vsrc_from_digital(block)
@@ -250,28 +256,27 @@ class MixedSignalBridge:
                 vcd_writer.register_digital_signal(pin_name, width)
             vcd_writer.open()
             vcd_writer.write_header()
-            ngspice._vcd_writer = vcd_writer
+            sim._vcd_writer = vcd_writer
 
         # Set initial sync time
-        ngspice._next_sync_time = self._max_sync_interval_sec
+        sim._next_sync_time = self._max_sync_interval_sec
 
         log.info(
-            "Starting mixed-signal co-simulation: max_sync_interval=%.1fns, duration=%.1fns",
-            self._max_sync_interval_ns, duration_ns,
+            "Starting mixed-signal co-simulation (%s): max_sync_interval=%.1fns, duration=%.1fns",
+            simulator, self._max_sync_interval_ns, duration_ns,
         )
 
-        # Run ngspice blocking tran in a @bridge thread.
-        # The GetSyncData callback will call _on_sync_point_resume (a @resume
-        # function) at each sync point, which blocks the ngspice thread and
-        # runs the signal exchange + Timer advance in the cocotb scheduler.
+        # Run simulation in a @bridge thread.
+        # The sync callback blocks the simulator thread and runs the signal
+        # exchange + Timer advance in the cocotb scheduler.
         tran_step = self._analog_blocks[0].tran_step if self._analog_blocks else "0.1n"
         try:
-            await self._run_ngspice_tran(tran_step, f"{duration_ns}n")
+            await self._run_simulation(tran_step, f"{duration_ns}n")
         finally:
             self._running = False
             # Close analog VCD file even if simulation threw an exception
-            if ngspice._vcd_writer is not None:
-                ngspice._vcd_writer.close()
+            if sim._vcd_writer is not None:
+                sim._vcd_writer.close()
                 log.info("Analog VCD written to: %s", analog_vcd)
 
         log.info("Mixed-signal co-simulation finished")
@@ -283,11 +288,11 @@ class MixedSignalBridge:
 
         self._running = False
 
-        if self._ngspice is not None:
-            if self._ngspice._vcd_writer is not None:
-                self._ngspice._vcd_writer.close()
-                self._ngspice._vcd_writer = None
-            self._ngspice.halt()
+        if self._sim is not None:
+            if self._sim._vcd_writer is not None:
+                self._sim._vcd_writer.close()
+                self._sim._vcd_writer = None
+            self._sim.halt()
 
         # Release all forced output signals
         for block in self._analog_blocks:
@@ -305,7 +310,7 @@ class MixedSignalBridge:
             input_name: Name of the analog input (as specified in analog_inputs).
             voltage: New voltage value.
         """
-        if self._ngspice is None:
+        if self._sim is None:
             raise RuntimeError("Bridge not started")
 
         ain_vsrc = self._block_analog_vsrc_names.get(block_name, {}).get(input_name)
@@ -313,7 +318,7 @@ class MixedSignalBridge:
             raise KeyError(
                 f"No analog input '{input_name}' on block '{block_name}'"
             )
-        self._ngspice.set_vsrc(ain_vsrc, voltage)
+        self._sim.set_vsrc(ain_vsrc, voltage)
 
     def get_analog_voltage(self, block_name: str, node: str) -> float:
         """Probe any SPICE node voltage.
@@ -325,29 +330,41 @@ class MixedSignalBridge:
         Returns:
             Latest voltage at the node.
         """
-        if self._ngspice is None:
+        if self._sim is None:
             raise RuntimeError("Bridge not started")
-        return self._ngspice.get_node_voltage(node)
+        return self._sim.get_node_voltage(node)
 
     # ------------------------------------------------------------------ #
-    # Internal: ngspice thread via bridge/resume
+    # Internal: simulator creation and thread via bridge/resume
     # ------------------------------------------------------------------ #
+
+    def _create_simulator(self, simulator: str) -> SimulatorInterface:
+        """Create the appropriate simulator interface."""
+        if simulator == "ngspice":
+            return NgspiceInterface(self._simulator_lib)
+        elif simulator == "xyce":
+            from cocotbext.ams._xyce import XyceInterface
+            return XyceInterface(self._simulator_lib)
+        else:
+            raise ValueError(
+                f"Unknown simulator: {simulator!r} (expected 'ngspice' or 'xyce')"
+            )
 
     @bridge
-    def _run_ngspice_tran(self, tran_step: str, tran_stop: str) -> None:
-        """Run ngspice blocking tran command in a bridge thread.
+    def _run_simulation(self, tran_step: str, tran_stop: str) -> None:
+        """Run the simulator's transient analysis in a bridge thread.
 
-        The GetSyncData callback fires at each ngspice timestep. When a sync
-        point is reached, it calls the @resume function _on_sync_point_resume,
-        which blocks this thread and lets the cocotb scheduler run the signal
-        exchange and Timer advance.
+        For ngspice: the GetSyncData callback triggers sync points.
+        For Xyce: the explicit stepping loop triggers sync points.
+        Both call the @resume function _on_sync_point_resume at each
+        sync point.
         """
-        assert self._ngspice is not None
-        self._ngspice.command(f"tran {tran_step} {tran_stop} uic")
+        assert self._sim is not None
+        self._sim.run_simulation(tran_step, tran_stop)
 
     @resume
     async def _on_sync_point_resume(self) -> None:
-        """Called from the ngspice thread (via GetSyncData) at each sync point.
+        """Called from the simulator thread at each sync point.
 
         Sync points are triggered either by a threshold crossing (event-driven)
         or by the fallback interval ceiling. This @resume function runs in
@@ -356,25 +373,25 @@ class MixedSignalBridge:
         2. Advances digital simulation by the actual elapsed SPICE time.
         3. Advances _next_sync_time for the next fallback interval.
         """
-        assert self._ngspice is not None
+        assert self._sim is not None
 
-        if self._ngspice._error is not None:
-            raise self._ngspice._error
+        if self._sim._error is not None:
+            raise self._sim._error
 
         # Analog -> Digital: read SPICE outputs, force onto Verilog
         for block in self._analog_blocks:
             self._read_analog_outputs(block)
 
         # Advance digital simulation by actual elapsed time
-        elapsed_sec = self._ngspice._spice_time - self._last_sync_spice_time
+        elapsed_sec = self._sim._spice_time - self._last_sync_spice_time
         elapsed_ns = elapsed_sec * 1e9
         if elapsed_ns > 0:
             await Timer(round(elapsed_ns * 1000), "ps")
-        self._last_sync_spice_time = self._ngspice._spice_time
+        self._last_sync_spice_time = self._sim._spice_time
 
         # Advance fallback sync time
-        self._ngspice._next_sync_time = (
-            self._ngspice._spice_time + self._max_sync_interval_sec
+        self._sim._next_sync_time = (
+            self._sim._spice_time + self._max_sync_interval_sec
         )
 
     # ------------------------------------------------------------------ #
@@ -390,7 +407,7 @@ class MixedSignalBridge:
         signal changes with zero sync overhead — the updated VSRC dict is
         read by ngspice on its next internal evaluation step.
         """
-        assert self._ngspice is not None
+        assert self._sim is not None
         vsrc_map = self._block_vsrc_names.get(block.name, {})
         vsrc_names = vsrc_map.get(pin_name, [])
         if not vsrc_names:
@@ -427,15 +444,15 @@ class MixedSignalBridge:
 
             voltages = pin.digital_to_analog(val)
             for vsrc_name, voltage in zip(vsrc_names, voltages):
-                self._ngspice.set_vsrc(vsrc_name, voltage)
+                self._sim.set_vsrc(vsrc_name, voltage)
 
     # ------------------------------------------------------------------ #
     # Internal: signal exchange
     # ------------------------------------------------------------------ #
 
     def _update_vsrc_from_digital(self, block: AnalogBlock) -> None:
-        """Read Verilog input signals and update ngspice VSRC values."""
-        assert self._ngspice is not None
+        """Read Verilog input signals and update VSRC values."""
+        assert self._sim is not None
 
         vsrc_map = self._block_vsrc_names.get(block.name, {})
         for pin_name, pin in block.digital_pins.items():
@@ -456,11 +473,11 @@ class MixedSignalBridge:
             # Convert to analog voltages and set VSRC values
             voltages = pin.digital_to_analog(val)
             for vsrc_name, voltage in zip(vsrc_names, voltages):
-                self._ngspice.set_vsrc(vsrc_name, voltage)
+                self._sim.set_vsrc(vsrc_name, voltage)
 
     def _read_analog_outputs(self, block: AnalogBlock) -> None:
-        """Read ngspice output node voltages and force onto Verilog signals."""
-        assert self._ngspice is not None
+        """Read simulator output node voltages and force onto Verilog signals."""
+        assert self._sim is not None
 
         output_nodes = self._block_output_nodes.get(block.name, {})
         for pin_name, pin in block.digital_pins.items():
@@ -474,11 +491,11 @@ class MixedSignalBridge:
             # Read voltages from ngspice
             voltages = []
             for node in node_names:
-                v = self._ngspice.get_node_voltage(node)
+                v = self._sim.get_node_voltage(node)
                 voltages.append(v)
 
             # Convert to digital value (use prev_value for hysteresis)
-            prev_val = self._ngspice._prev_digital_values.get(pin_name)
+            prev_val = self._sim._prev_digital_values.get(pin_name)
             digital_val = pin.analog_to_digital(voltages, prev_value=prev_val)
 
             # Force onto Verilog signal

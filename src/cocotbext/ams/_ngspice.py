@@ -9,9 +9,10 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import logging
-import threading
 from pathlib import Path
 from typing import Any
+
+from cocotbext.ams._simulator import SimulatorInterface
 
 log = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ def _find_libngspice(hint: str | Path | None = None) -> str:
     )
 
 
-class NgspiceInterface:
+class NgspiceInterface(SimulatorInterface):
     """Wrapper around libngspice shared library via ctypes.
 
     This class is the sole owner of the ngspice C library handle.
@@ -140,37 +141,9 @@ class NgspiceInterface:
     """
 
     def __init__(self, lib_path: str | Path | None = None) -> None:
+        super().__init__()
         self._lib_path = _find_libngspice(lib_path)
         self._lib = ctypes.CDLL(self._lib_path)
-
-        # Data exchange dictionaries
-        self._vsrc_values: dict[str, float] = {}
-        self._node_voltages: dict[str, float] = {}
-
-        # Sync state
-        self._next_sync_time: float = 0.0
-        self._spice_time: float = 0.0
-        self._simulation_done = False
-
-        # Callback invoked at each sync point — set by the bridge.
-        # Signature: () -> None.  Called from the ngspice thread; expected
-        # to be a @resume-decorated function that blocks until cocotb is done.
-        self._on_sync_point: Any = None
-
-        # Crossing detection state
-        self._crossing_detected: bool = False
-        self._prev_digital_values: dict[str, int] = {}
-        # Registered by bridge: pin_name -> (node_names, DigitalPin)
-        self._output_pin_configs: dict[str, tuple[list[str], Any]] = {}
-
-        # Analog VCD writer — set by bridge when analog_vcd is requested
-        self._vcd_writer: Any = None
-
-        # Error tracking
-        self._error: Exception | None = None
-
-        # Event signaled when ngspice pauses (exit or bg thread stop)
-        self._ngspice_paused = threading.Event()
 
         # Create and store callback instances (prevent GC)
         self._cb_send_char = SEND_CHAR(self._on_send_char)
@@ -248,7 +221,7 @@ class NgspiceInterface:
         else:
             log.debug("ngspice quit (status=%d)", exit_status)
         self._simulation_done = True
-        self._ngspice_paused.set()
+        self._sim_paused.set()
         return 0
 
     def _on_send_data(
@@ -287,30 +260,10 @@ class NgspiceInterface:
         self._check_crossings()
 
         # Write VCD data at full ngspice resolution
-        if self._vcd_writer is not None and sim_time is not None:
-            self._vcd_writer.write_values(
-                sim_time,
-                analog_values=self._node_voltages,
-                digital_values=self._prev_digital_values,
-            )
+        if sim_time is not None:
+            self._write_vcd(sim_time)
 
         return 0
-
-    def _check_crossings(self) -> None:
-        """Check output pins for threshold crossings after voltage update."""
-        for pin_name, (node_names, pin) in self._output_pin_configs.items():
-            voltages = [self._node_voltages.get(n, 0.0) for n in node_names]
-            prev_val = self._prev_digital_values.get(pin_name)
-            new_val = pin.analog_to_digital(voltages, prev_value=prev_val)
-            if prev_val is not None and new_val != prev_val:
-                self._crossing_detected = True
-                log.debug(
-                    "Threshold crossing: %s %d->%d at t=%.3fus (v=%s)",
-                    pin_name, prev_val, new_val,
-                    self._spice_time * 1e6,
-                    ", ".join(f"{v:.3f}" for v in voltages),
-                )
-            self._prev_digital_values[pin_name] = new_val
 
     def _on_send_init_data(self, vdata: Any, ident: int, userdata: Any) -> int:
         return 0
@@ -319,7 +272,7 @@ class NgspiceInterface:
         log.debug("ngspice bg thread running: %s", running)
         if not running:
             self._simulation_done = True
-            self._ngspice_paused.set()
+            self._sim_paused.set()
         return 0
 
     def _on_get_vsrc_data(
@@ -381,7 +334,7 @@ class NgspiceInterface:
         return 0
 
     # ------------------------------------------------------------------ #
-    # Public API
+    # Public API (SimulatorInterface)
     # ------------------------------------------------------------------ #
 
     def load_circuit(self, lines: list[str]) -> None:
@@ -397,6 +350,10 @@ class NgspiceInterface:
         ret = self._lib.ngSpice_Circ(c_lines)
         if ret != 0:
             raise RuntimeError(f"ngSpice_Circ failed with code {ret}")
+
+    def run_simulation(self, tran_step: str, tran_stop: str) -> None:
+        """Run a transient simulation via ngspice's tran command."""
+        self.command(f"tran {tran_step} {tran_stop} uic")
 
     def command(self, cmd: str) -> None:
         """Send a command to ngspice for immediate execution."""

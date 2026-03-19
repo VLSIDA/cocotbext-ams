@@ -87,3 +87,83 @@ def test_single_bit_names():
     vsrc = get_vsrc_names(pins)
     # Single-bit pins don't get _0 suffix
     assert vsrc == {"clk": ["v_dig_clk"]}
+
+
+def test_generate_xyce_netlist():
+    """Xyce netlist uses YDAC devices, .PRINT TRAN, .TRAN (no uic), .END."""
+    pins = {
+        "clk": DigitalPin("input"),
+        "data_out": DigitalPin("output", width=4),
+    }
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".sp", delete=False,
+    ) as f:
+        f.write(".subckt my_block clk data_out_0 data_out_1 data_out_2 data_out_3 ain vdd vss\n")
+        f.write("* dummy\n")
+        f.write(".ends my_block\n")
+        spice_path = f.name
+
+    lines = generate_netlist(
+        spice_file=spice_path,
+        subcircuit="my_block",
+        digital_pins=pins,
+        analog_inputs={"ain": 0.9},
+        vdd=1.8,
+        vss=0.0,
+        tran_step="1n",
+        tran_stop="10u",
+        simulator="xyce",
+    )
+    text = "\n".join(lines)
+
+    # Check YDAC device for input pin (not EXTERNAL)
+    assert "YDAC v_dig_clk DAC clk 0" in text
+    assert "external" not in text.lower()
+
+    # Check YDAC for analog input
+    assert "YDAC v_ain DAC ain 0" in text
+
+    # Check output nodes use .PRINT TRAN
+    assert ".PRINT TRAN" in text
+    assert "v(data_out_0)" in text
+    assert "v(data_out_3)" in text
+    assert ".save" not in text.lower()
+
+    # Check power supplies (standard DC, not YDAC)
+    assert "v_vdd vdd 0 dc 1.8" in text
+    assert "v_vss vss 0 dc 0" in text
+
+    # Check subcircuit instantiation
+    assert "my_block" in text
+
+    # Check .TRAN (uppercase, no uic)
+    assert ".TRAN 1n 10u" in text
+    assert "uic" not in text.lower()
+
+    # Check .END (uppercase)
+    assert lines[-1] == ".END"
+
+    # Check .INCLUDE (uppercase)
+    assert ".INCLUDE" in text
+
+
+def test_generate_netlist_unknown_simulator():
+    """Unknown simulator raises ValueError."""
+    import pytest
+
+    pins = {"clk": DigitalPin("input")}
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".sp", delete=False,
+    ) as f:
+        f.write(".subckt my_block clk vdd vss\n")
+        f.write(".ends my_block\n")
+        spice_path = f.name
+
+    with pytest.raises(ValueError, match="Unknown simulator"):
+        generate_netlist(
+            spice_file=spice_path,
+            subcircuit="my_block",
+            digital_pins=pins,
+            analog_inputs={},
+            simulator="ltspice",
+        )
