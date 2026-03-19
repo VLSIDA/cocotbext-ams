@@ -13,6 +13,7 @@
   <a href="https://github.com/VLSIDA/cocotbext-ams/actions/workflows/test.yml"><img src="https://github.com/VLSIDA/cocotbext-ams/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   <a href="https://pypi.org/project/cocotbext-ams/"><img src="https://img.shields.io/pypi/pyversions/cocotbext-ams" alt="Python"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-green" alt="License"></a>
+  <a href="https://vlsida.github.io/cocotbext-ams/"><img src="https://img.shields.io/badge/docs-vlsida.github.io-blue" alt="Docs"></a>
 </p>
 
 ---
