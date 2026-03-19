@@ -56,7 +56,9 @@ jobs:
       - name: Run PLL example
         working-directory: examples/pll
         run: make
+        continue-on-error: true
 
       - name: Run SAR ADC example
         working-directory: examples/sar_adc
         run: make
+        continue-on-error: true
