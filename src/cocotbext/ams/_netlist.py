@@ -56,9 +56,32 @@ def generate_netlist(
     Returns:
         List of netlist lines.
     """
+    spice_path = Path(spice_file).resolve()
+    if not spice_path.is_file():
+        raise FileNotFoundError(
+            f"SPICE file not found: {spice_path}\n"
+            f"Check that spice_file='{spice_file}' points to an existing file."
+        )
+
+    # Verify the file contains the expected subcircuit
+    spice_content = spice_path.read_text()
+    if f".subckt {subcircuit}" not in spice_content.lower().replace(
+        f".subckt {subcircuit.lower()}", f".subckt {subcircuit}"
+    ):
+        # Case-insensitive check for .subckt definition
+        has_subckt = any(
+            line.strip().lower().startswith(f".subckt {subcircuit.lower()}")
+            for line in spice_content.splitlines()
+        )
+        if not has_subckt:
+            raise ValueError(
+                f"Subcircuit '{subcircuit}' not found in {spice_path}. "
+                f"Check that the subcircuit name matches a .subckt definition."
+            )
+
     lines: list[str] = []
     lines.append(f"* cocotbext-ams auto-generated wrapper for {subcircuit}")
-    lines.append(f".include {Path(spice_file).resolve()}")
+    lines.append(f".include {spice_path}")
     lines.append("")
 
     port_connections: list[str] = []

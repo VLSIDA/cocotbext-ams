@@ -4,6 +4,8 @@
 
 """Unit tests for netlist generation."""
 
+import tempfile
+
 from cocotbext.ams._netlist import (
     generate_netlist,
     get_output_node_names,
@@ -17,8 +19,17 @@ def test_generate_basic_netlist():
         "clk": DigitalPin("input"),
         "data_out": DigitalPin("output", width=4),
     }
+    # Create a temporary SPICE file with the expected subcircuit
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".sp", delete=False,
+    ) as f:
+        f.write(".subckt my_block clk data_out_0 data_out_1 data_out_2 data_out_3 ain vdd vss\n")
+        f.write("* dummy\n")
+        f.write(".ends my_block\n")
+        spice_path = f.name
+
     lines = generate_netlist(
-        spice_file="/tmp/test.sp",
+        spice_file=spice_path,
         subcircuit="my_block",
         digital_pins=pins,
         analog_inputs={"ain": 0.9},

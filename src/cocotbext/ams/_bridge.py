@@ -86,6 +86,17 @@ class MixedSignalBridge:
           blocks the ngspice thread and calls back into cocotb via ``@resume``
           to force new digital values and advance digital time.
 
+    Thread safety:
+        - ``_vsrc_values`` dict is written by cocotb coroutines (ValueChange
+          monitors) and read by the ngspice callback thread (GetVSRCData).
+          This is safe because Python's GIL ensures dict reads/writes are
+          atomic, and stale reads are acceptable (ngspice reads on every
+          evaluation step, so it picks up changes within one timestep).
+        - ``_node_voltages`` dict is written by the ngspice thread (SendData)
+          and read by cocotb (at sync points only, when ngspice is paused).
+        - All other shared state is only accessed at sync points when one
+          thread is blocked.
+
     Args:
         dut: cocotb DUT handle.
         analog_blocks: List of AnalogBlock descriptions.
@@ -254,14 +265,14 @@ class MixedSignalBridge:
         # function) at each sync point, which blocks the ngspice thread and
         # runs the signal exchange + Timer advance in the cocotb scheduler.
         tran_step = self._analog_blocks[0].tran_step if self._analog_blocks else "0.1n"
-        await self._run_ngspice_tran(tran_step, f"{duration_ns}n")
-
-        self._running = False
-
-        # Close analog VCD file
-        if ngspice._vcd_writer is not None:
-            ngspice._vcd_writer.close()
-            log.info("Analog VCD written to: %s", analog_vcd)
+        try:
+            await self._run_ngspice_tran(tran_step, f"{duration_ns}n")
+        finally:
+            self._running = False
+            # Close analog VCD file even if simulation threw an exception
+            if ngspice._vcd_writer is not None:
+                ngspice._vcd_writer.close()
+                log.info("Analog VCD written to: %s", analog_vcd)
 
         log.info("Mixed-signal co-simulation finished")
 
@@ -394,15 +405,17 @@ class MixedSignalBridge:
             )
             return
 
+        log.debug("Monitoring input %s.%s for value changes", block.name, pin_name)
         while self._running:
             try:
                 await ValueChange(handle)
             except Exception:
                 # ValueChange may not be supported on all simulators;
                 # fall back to letting sync points handle D→A updates.
-                log.debug(
-                    "ValueChange not available for %s.%s, "
-                    "falling back to sync-point updates",
+                log.warning(
+                    "ValueChange not available for %s.%s — "
+                    "falling back to sync-point updates. Input changes "
+                    "will only propagate at fallback sync intervals.",
                     block.name, pin_name,
                 )
                 return
@@ -494,6 +507,10 @@ class MixedSignalBridge:
 
         Supports hierarchical block names (e.g., ``"dut.u_analog"``) by
         traversing each component of the dotted path.
+
+        Raises:
+            AttributeError: If the signal cannot be found at the hierarchical
+                path or as a fallback on the DUT root.
         """
         try:
             handle = self._dut
@@ -501,4 +518,11 @@ class MixedSignalBridge:
                 handle = getattr(handle, part)
             return getattr(handle, pin_name)
         except AttributeError:
-            return getattr(self._dut, pin_name)
+            try:
+                return getattr(self._dut, pin_name)
+            except AttributeError:
+                raise AttributeError(
+                    f"Cannot find signal '{pin_name}' on block '{block_name}' "
+                    f"or on DUT root. Check that the block name matches your "
+                    f"Verilog hierarchy and the pin name matches the stub port."
+                ) from None

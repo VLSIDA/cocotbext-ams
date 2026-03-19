@@ -69,17 +69,40 @@ comparator output q (second), SAR value register (third), and done signal
 
 - **Python** >= 3.10
 - **cocotb** >= 2.0
-- **ngspice** >= 45, built as a shared library (`--with-ngshared`)
+- **ngspice** shared library (`libngspice.so` / `libngspice.dylib`)
 - A Verilog simulator supported by cocotb (e.g., Icarus Verilog)
 
-### Building ngspice with shared library support
+### Installing ngspice
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install libngspice0-dev
+```
+
+**Fedora/RHEL:**
+```bash
+sudo dnf install libngspice-devel
+```
+
+**macOS (Homebrew):**
+```bash
+brew install ngspice
+```
+
+**Conda (any platform):**
+```bash
+conda install -c conda-forge ngspice
+```
+
+#### Building from source
+
+If your distribution doesn't package the shared library, or you need a specific version:
 
 ```bash
 cd ngspice
 mkdir build && cd build
 ../configure --with-ngshared --enable-xspice --enable-cider
-make -j$(nproc)
-# libngspice.so will be in src/.libs/
+make -j$(nproc) && sudo make install
 ```
 
 ## Installation
@@ -271,3 +294,62 @@ The bridge auto-generates a wrapper SPICE deck around the user's subcircuit:
 ngspice may report vector names with plot prefixes (e.g., `tran1.v(d0)`) or
 wrapped in `v()`. The bridge normalizes lookups so you can query by bare node
 name (`d0`), `v(d0)`, or the full qualified name.
+
+## Troubleshooting
+
+### ngspice not found
+
+```
+FileNotFoundError: Cannot find libngspice.so
+```
+
+Install the ngspice shared library for your platform (see
+[Installing ngspice](#installing-ngspice) above). If the library is installed
+in a non-standard location, pass the path explicitly:
+
+```python
+bridge = MixedSignalBridge(dut, blocks, ngspice_lib="/path/to/libngspice.so")
+```
+
+### Signal not found
+
+```
+AttributeError: Cannot find signal 'q' on block 'dut.u_analog'
+```
+
+The block name must match your Verilog hierarchy. If the SPICE stub module
+`pwm_dac` is instantiated as `u_analog` inside a `dut` wrapper, use
+`name="dut.u_analog"`. The pin name must match a port on the stub module.
+
+### Sawtooth on filtered output
+
+If the RC filter output looks like a sawtooth instead of a smooth DC level,
+the PWM period is too close to the RC time constant. The PWM period should
+be at least 10-40x smaller than τ:
+
+- τ = 10kΩ × 1nF = 10μs → PWM period should be ≤ 1μs (≥ 1MHz clock)
+- τ = 10kΩ × 100pF = 1μs → PWM period should be ≤ 100ns (≥ 10MHz clock)
+
+### Simulation hangs
+
+If the simulation appears to hang, check:
+
+1. **Missing `ValueChange` support:** Some simulators don't support
+   `ValueChange`. The bridge logs a warning and falls back to sync-point
+   updates. Check your cocotb log output.
+2. **Too-tight sync interval:** Very small `max_sync_interval_ns` values
+   (< 1ns) can make the simulation extremely slow. Start with 50-100ns.
+3. **ngspice convergence:** Complex SPICE circuits may fail to converge.
+   Check the cocotb log for `ngspice: stderr` warnings.
+
+### Debugging sync behavior
+
+Enable debug logging to see threshold crossings and sync points:
+
+```python
+import logging
+logging.getLogger("cocotbext.ams").setLevel(logging.DEBUG)
+```
+
+This shows each threshold crossing event with timestamp, pin name,
+old/new values, and voltages.

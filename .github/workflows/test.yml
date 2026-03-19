@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest tests/ -v
+
+      - name: Type check
+        run: |
+          pip install mypy
+          mypy src/cocotbext/ams/ --ignore-missing-imports
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check src/ tests/
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ngspice and Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libngspice0-dev iverilog
+
+      - name: Install cocotbext-ams
+        run: pip install -e ".[dev]"
+
+      - name: Run PLL example
+        working-directory: examples/pll
+        run: make
+
+      - name: Run SAR ADC example
+        working-directory: examples/sar_adc
+        run: make

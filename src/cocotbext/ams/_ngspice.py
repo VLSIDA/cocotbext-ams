@@ -9,6 +9,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -101,16 +102,32 @@ def _find_libngspice(hint: str | Path | None = None) -> str:
         if p.is_file():
             return str(p)
         if p.is_dir():
-            for candidate in sorted(p.glob("libngspice*.so*")):
-                return str(candidate)
+            for pattern in ("libngspice*.so*", "libngspice*.dylib*"):
+                for candidate in sorted(p.glob(pattern)):
+                    return str(candidate)
         raise FileNotFoundError(f"Cannot find libngspice at: {hint}")
 
     found = ctypes.util.find_library("ngspice")
     if found:
         return found
+
+    import sys
+
+    if sys.platform == "darwin":
+        install_hint = "Install via Homebrew: brew install ngspice"
+    elif sys.platform == "linux":
+        install_hint = (
+            "Install the ngspice shared library for your distribution:\n"
+            "  Ubuntu/Debian: sudo apt-get install libngspice0-dev\n"
+            "  Fedora/RHEL:   sudo dnf install libngspice-devel\n"
+            "  Conda:         conda install -c conda-forge ngspice"
+        )
+    else:
+        install_hint = "Install ngspice with shared library support"
+
     raise FileNotFoundError(
-        "Cannot find libngspice.so. Install ngspice with --with-ngshared "
-        "or pass the library path explicitly."
+        f"Cannot find libngspice shared library.\n{install_hint}\n"
+        "Or pass the library path explicitly via ngspice_lib='...'."
     )
 
 
@@ -151,6 +168,9 @@ class NgspiceInterface:
 
         # Error tracking
         self._error: Exception | None = None
+
+        # Event signaled when ngspice pauses (exit or bg thread stop)
+        self._ngspice_paused = threading.Event()
 
         # Create and store callback instances (prevent GC)
         self._cb_send_char = SEND_CHAR(self._on_send_char)
@@ -284,6 +304,12 @@ class NgspiceInterface:
             new_val = pin.analog_to_digital(voltages, prev_value=prev_val)
             if prev_val is not None and new_val != prev_val:
                 self._crossing_detected = True
+                log.debug(
+                    "Threshold crossing: %s %d->%d at t=%.3fus (v=%s)",
+                    pin_name, prev_val, new_val,
+                    self._spice_time * 1e6,
+                    ", ".join(f"{v:.3f}" for v in voltages),
+                )
             self._prev_digital_values[pin_name] = new_val
 
     def _on_send_init_data(self, vdata: Any, ident: int, userdata: Any) -> int:

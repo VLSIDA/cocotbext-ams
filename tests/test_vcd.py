@@ -75,13 +75,13 @@ def test_digital_signal_single_bit():
 
         lines = content.splitlines()
         # Find value change lines (after #0, #1000, #2000)
-        value_lines = [l for l in lines if l and l[0] in "01"]
+        value_lines = [ln for ln in lines if ln and ln[0] in "01"]
         assert len(value_lines) == 3
         # First is 0, then 1, then 0
         vid = None
-        for l in lines:
-            if "$var wire 1" in l:
-                vid = l.split()[3]  # extract VCD id
+        for ln in lines:
+            if "$var wire 1" in ln:
+                vid = ln.split()[3]  # extract VCD id
                 break
         assert f"0{vid}" in content
         assert f"1{vid}" in content
@@ -283,6 +283,7 @@ def _make_ngspice_with_vcd(vcd_path, analog_names, digital_pins=None):
     ngspice._crossing_detected = False
     ngspice._prev_digital_values = {}
     ngspice._output_pin_configs = {}
+    ngspice._spice_time = 0.0
 
     vcd = AnalogVcdWriter(vcd_path)
     for name in analog_names:

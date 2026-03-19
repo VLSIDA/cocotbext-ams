@@ -111,6 +111,7 @@ def test_crossing_detection_basic():
     ngspice._node_voltages = {}
     ngspice._crossing_detected = False
     ngspice._prev_digital_values = {}
+    ngspice._spice_time = 0.0
 
     pin = DigitalPin("output", vdd=1.8, vss=0.0)
     ngspice._output_pin_configs = {"out": (["out_node"], pin)}
@@ -139,6 +140,7 @@ def test_crossing_detection_with_hysteresis():
     ngspice._node_voltages = {}
     ngspice._crossing_detected = False
     ngspice._prev_digital_values = {}
+    ngspice._spice_time = 0.0
 
     pin = DigitalPin("output", vdd=1.8, vss=0.0, hysteresis=0.2)
     ngspice._output_pin_configs = {"out": (["out_node"], pin)}
@@ -180,6 +182,7 @@ def test_crossing_detection_multipin():
     ngspice._node_voltages = {}
     ngspice._crossing_detected = False
     ngspice._prev_digital_values = {}
+    ngspice._spice_time = 0.0
 
     pin_a = DigitalPin("output", vdd=1.8, vss=0.0)
     pin_b = DigitalPin("output", vdd=1.8, vss=0.0)
