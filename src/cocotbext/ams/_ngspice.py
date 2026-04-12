@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import ctypes.util
 import logging
@@ -315,7 +316,11 @@ class NgspiceInterface(SimulatorInterface):
             self._crossing_detected = False
             self._spice_time = ckttime
             if self._on_sync_point is not None:
-                self._on_sync_point()
+                try:
+                    self._on_sync_point()
+                except (asyncio.CancelledError, RuntimeError):
+                    self._simulation_done = True
+                    return 0
             return 0
 
         time_to_sync = self._next_sync_time - ckttime
@@ -324,7 +329,11 @@ class NgspiceInterface(SimulatorInterface):
             # Reached fallback sync point — hand control to cocotb.
             self._spice_time = ckttime
             if self._on_sync_point is not None:
-                self._on_sync_point()
+                try:
+                    self._on_sync_point()
+                except (asyncio.CancelledError, RuntimeError):
+                    self._simulation_done = True
+                    return 0
             return 0
 
         # Clamp delta so we don't overshoot the next sync point
