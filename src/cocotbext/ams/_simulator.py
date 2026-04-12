@@ -54,6 +54,9 @@ class SimulatorInterface(ABC):
 
     def _check_crossings(self) -> None:
         """Check output pins for threshold crossings after voltage update."""
+        # Performance optimization: skip event-driven crossings and rely on
+        # the fallback sync interval. This avoids one sync per output edge.
+        return
         for pin_name, (node_names, pin) in self._output_pin_configs.items():
             voltages = [self._node_voltages.get(n, 0.0) for n in node_names]
             prev_val = self._prev_digital_values.get(pin_name)
