@@ -13,7 +13,6 @@ happen asynchronously via ValueChange monitors — no sync overhead.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import warnings
 from dataclasses import dataclass, field
@@ -389,11 +388,7 @@ class MixedSignalBridge:
         elapsed_ns = elapsed_sec * 1e9
         if elapsed_ns > 0:
             ps = max(1, round(elapsed_ns * 1000))
-            try:
-                await Timer(ps, "ps")
-            except asyncio.CancelledError:
-                self._running = False
-                return
+            await Timer(ps, "ps")
         self._last_sync_spice_time = self._sim._spice_time
 
         # Advance fallback sync time
